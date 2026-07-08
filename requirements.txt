@@ -1,0 +1,12 @@
+biopython
+esm
+faiss-cpu
+fastapi
+numpy
+pandas>=1.3.0
+requests>=2.25.0
+sentencepiece
+tiktoken
+torch
+transformers
+uvicorn
