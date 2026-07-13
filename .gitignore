@@ -1,8 +1,37 @@
-data/
-.venv/
+# ==========================================
+# Python
+# ==========================================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+
+# Testing
 .pytest_cache/
+.coverage
+htmlcov/
+
+# ==========================================
+# Data & Databases (never commit)
+# ==========================================
+data/
+
+# ==========================================
+# Runtime artifacts
+# ==========================================
 tmp/
 logs/
 *.log
+*.pickle
+
+# ==========================================
+# OS-specific
+# ==========================================
+.DS_Store
+Thumbs.db

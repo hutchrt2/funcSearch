@@ -6,7 +6,7 @@ import time
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from fastapi.testclient import TestClient
-from server import app, db
+from psmm.api.server import app, db
 
 client = TestClient(app)
 
@@ -24,6 +24,14 @@ def run_tests():
         assert stats["concepts"] > 0
         assert stats["relations"] > 0
         print("Stats endpoint test passed!")
+
+        print("\n--- 1b. Testing /api/resolve_entities endpoint ---")
+        resolve_res = test_client.post("/api/resolve_entities", json={"terms": ["GABA"], "category": "compound"})
+        print("Status Code:", resolve_res.status_code)
+        print("Response:", resolve_res.json())
+        assert resolve_res.status_code == 200
+        assert len(resolve_res.json()) > 0
+        print("Resolve entities endpoint test passed!")
 
         print("\n--- 2. Testing /api/extract endpoint (compounds only) ---")
         # Let's extract relations for compound "GABA"
@@ -73,7 +81,7 @@ def run_tests():
         # To do this, let's look at sequence_index.json accession A0A022PNA9, which links to entity: PMC4125134.entity.f9ce18b23f49 (elongation factor Tu)
         # Suffix is f9ce18b23f49.
         # We can mock perform_search_internal by putting search results directly into _search_cache to avoid executing bridge script subprocess
-        from server import _search_cache
+        from psmm.api.server import _search_cache
         sequence = "MGRAPCCDKASVKRGPWSPEEDEQLRSYVQSHGIGGNWIALPQKAGLNRCGKSCRLRWLNYLRPDIKHGGYTEQEDHIICSLYNSIGSRWSIIASKLPGRTDNDVKNYWNTKLKKKAMGAVQPRAAASAPSQCTSSAMAPALSPASSSVTSSSGDACFAAAATTTTTMYPPPTTPPQQQFIRFDAPPAAAAAASPTDLAPVPPPATVTADGDGGWASDALSLDDVFLGELTAGEPLFPYAELFSGFAGAAPDSKATLELSACYFPNMAEMWAASDHAYAKPQGLCNTLT"
         mock_results = [{
             "query": "query_sequence",
@@ -85,7 +93,7 @@ def run_tests():
         }]
         
         # Insert mock search result into cache
-        _search_cache[(sequence.strip().upper(), "embed2graph")] = mock_results
+        _search_cache[(sequence.strip().upper(), "embed2graph", None, None, None)] = mock_results
         
         fasta_payload = {
             "compounds": "",

@@ -1,6 +1,7 @@
 import os
 import subprocess
 import pandas as pd
+import numpy as np
 import json
 import re
 import uuid
@@ -8,6 +9,7 @@ import asyncio
 from collections import defaultdict
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
@@ -18,15 +20,15 @@ from typing import List, Optional, Dict, Any
 _search_cache = {}
 _search_cache_lock = asyncio.Lock()
 
-async def get_cached_search(sequence: str, method: str):
+async def get_cached_search(sequence: str, method: str, evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None):
     normalized_seq = sequence.strip().upper()
-    key = (normalized_seq, method)
+    key = (normalized_seq, method, evalue, min_seq_id, k, min_similarity)
     async with _search_cache_lock:
         return _search_cache.get(key)
 
-async def set_cached_search(sequence: str, method: str, results: List[dict]):
+async def set_cached_search(sequence: str, method: str, results: List[dict], evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None):
     normalized_seq = sequence.strip().upper()
-    key = (normalized_seq, method)
+    key = (normalized_seq, method, evalue, min_seq_id, k, min_similarity)
     async with _search_cache_lock:
         if len(_search_cache) > 2000:
             _search_cache.clear()
@@ -35,15 +37,15 @@ async def set_cached_search(sequence: str, method: str, results: List[dict]):
 _extract_cache = {}
 _extract_cache_lock = asyncio.Lock()
 
-async def get_cached_extract(compounds: str, fasta: str, attributes: dict, method: str):
+async def get_cached_extract(compounds: str, fasta: str, attributes: dict, method: str, evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None):
     frozen_attrs = tuple(sorted(attributes.items())) if attributes else ()
-    key = (compounds.strip(), fasta.strip(), frozen_attrs, method)
+    key = (compounds.strip(), fasta.strip(), frozen_attrs, method, evalue, min_seq_id, k, min_similarity)
     async with _extract_cache_lock:
         return _extract_cache.get(key)
 
-async def set_cached_extract(compounds: str, fasta: str, attributes: dict, method: str, results: List[dict]):
+async def set_cached_extract(compounds: str, fasta: str, attributes: dict, method: str, results: List[dict], evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None):
     frozen_attrs = tuple(sorted(attributes.items())) if attributes else ()
-    key = (compounds.strip(), fasta.strip(), frozen_attrs, method)
+    key = (compounds.strip(), fasta.strip(), frozen_attrs, method, evalue, min_seq_id, k, min_similarity)
     async with _extract_cache_lock:
         if len(_extract_cache) > 1000:
             _extract_cache.clear()
@@ -394,6 +396,25 @@ class PSFDDatabase:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Database file not found at: {filepath}")
             
+        pickle_path = filepath + ".pickle"
+        if os.path.exists(pickle_path) and os.path.getmtime(pickle_path) > os.path.getmtime(filepath):
+            print(f"Loading pre-parsed database from cache: {pickle_path}...")
+            try:
+                import pickle
+                with open(pickle_path, "rb") as f:
+                    cached_data = pickle.load(f)
+                self.entities = cached_data.get("entities", [])
+                self.relations = cached_data.get("relations", [])
+                self.entity_by_id = cached_data.get("entity_by_id", {})
+                self.relations_by_entity = cached_data.get("relations_by_entity", defaultdict(list))
+                self.entities_by_hash = cached_data.get("entities_by_hash", defaultdict(list))
+                self.entities_by_category = cached_data.get("entities_by_category", defaultdict(list))
+                self.concepts_count = cached_data.get("concepts_count", 0)
+                print(f"Database loaded from cache successfully: {len(self.entities)} entities, {self.concepts_count} concepts, {len(self.relations)} relations.")
+                return
+            except Exception as e:
+                print(f"Warning: Failed to load database pickle cache: {e}. Falling back to JSON parsing...")
+
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
             
@@ -480,6 +501,24 @@ class PSFDDatabase:
             for eid in all_associated_ids:
                 if eid:
                     self.relations_by_entity[eid].append(rel)
+
+        print(f"Saving parsed database to pickle cache: {pickle_path}...")
+        try:
+            import pickle
+            cache_data = {
+                "entities": self.entities,
+                "relations": self.relations,
+                "entity_by_id": self.entity_by_id,
+                "relations_by_entity": self.relations_by_entity,
+                "entities_by_hash": self.entities_by_hash,
+                "entities_by_category": self.entities_by_category,
+                "concepts_count": self.concepts_count
+            }
+            with open(pickle_path, "wb") as f:
+                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print("Database pickle cache saved successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to write database pickle cache: {e}")
 
     def _get_global_endpoint_ids(self, rel: dict, role: str) -> list:
         single = rel.get(f"{role}_entity_id")
@@ -945,8 +984,10 @@ app.add_middleware(
         "http://localhost",
         "http://127.0.0.1",
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
+        "http://127.0.0.1:3001",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -956,6 +997,10 @@ app.add_middleware(
 class SearchRequest(BaseModel):
     sequence: str
     method: str  # e.g., 'embed2graph' or 'seq2graph'
+    evalue: Optional[float] = None
+    min_seq_id: Optional[float] = None
+    k: Optional[int] = None
+    min_similarity: Optional[float] = None
 
 class SearchResult(BaseModel):
     query: str
@@ -966,6 +1011,7 @@ class SearchResult(BaseModel):
     selected_organism: Optional[str] = None
     score: Optional[float] = None
     score_type: Optional[str] = None
+    entities: Optional[List[dict]] = None
 
 def convert_dataframe_to_json(df: pd.DataFrame) -> List[dict]:
     """
@@ -981,89 +1027,221 @@ def convert_dataframe_to_json(df: pd.DataFrame) -> List[dict]:
                 r[k] = None
     return records
 
-async def perform_search_internal(sequence: str, method: str) -> List[dict]:
-    # Check cache first
-    cached = await get_cached_search(sequence, method)
-    if cached is not None:
-        return cached
+# ==========================================
+# In-Process Search Bridge Execution
+# ==========================================
 
-    # Generate unique filename for temporary FASTA and output CSV to avoid race conditions
+_esmc_model = None
+_faiss_index = None
+_faiss_uniprot_ids = []
+_esmc_lock = asyncio.Lock()
+_metadata_df_cache = None
+
+def get_sequence_metadata_df():
+    global _metadata_df_cache
+    if _metadata_df_cache is not None:
+        return _metadata_df_cache
+        
+    script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    meta_path = os.path.join(script_dir, "data", "build", "sequence_metadata.csv")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(f"Metadata CSV not found at {meta_path}")
+        
+    df = pd.read_csv(meta_path)
+    if "target_accession" in df.columns:
+        df = df.rename(columns={"target_accession": "uniprot_id"})
+    _metadata_df_cache = df
+    return df
+
+async def lazy_load_esmc_and_faiss():
+    global _esmc_model, _faiss_index, _faiss_uniprot_ids
+    if _esmc_model is not None and _faiss_index is not None:
+        return
+        
+    async with _esmc_lock:
+        if _esmc_model is not None and _faiss_index is not None:
+            return
+            
+        print("Lazy-loading ESM-C model and FAISS index in-process...")
+        import faiss
+        import torch
+        from esm.models.esmc import ESMC
+        
+        # Load FAISS index
+        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        db_dir = os.path.join(script_dir, "data", "embeddb")
+        index_path = os.path.join(db_dir, "faiss_index.bin")
+        id_path = os.path.join(db_dir, "index_uniprot_ids.txt")
+        
+        if not os.path.exists(index_path) or not os.path.exists(id_path):
+            raise FileNotFoundError(f"FAISS index files not found in {db_dir}. Ensure embed2graph is initialized.")
+            
+        _faiss_index = faiss.read_index(index_path)
+        with open(id_path, "r") as f:
+            _faiss_uniprot_ids = [line.strip() for line in f]
+            
+        # Determine device
+        device = "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+            
+        # Load ESM-C model
+        print(f"Loading ESMC model on {device}...")
+        _esmc_model = ESMC.from_pretrained("esmc_300m", device=torch.device(device))
+        _esmc_model.eval()
+        print("ESM-C model and FAISS index loaded successfully in-process.")
+
+def embed_single_sequence_in_process(sequence: str) -> np.ndarray:
+    import torch
+    from esm.sdk.api import ESMProtein, LogitsConfig
+    
+    import re
+    clean_seq = re.sub(r'\s+', '', sequence.upper())
+    
+    protein = ESMProtein(sequence=clean_seq)
+    protein_tensor = _esmc_model.encode(protein)
+    
+    with torch.no_grad():
+        logits_output = _esmc_model.logits(
+            protein_tensor, 
+            LogitsConfig(sequence=True, return_embeddings=True)
+        )
+        token_embeddings = logits_output.embeddings
+        mean_pooled = token_embeddings.mean(dim=1)
+        mean_pooled = torch.nn.functional.normalize(mean_pooled, p=2, dim=1)
+        return mean_pooled.to(torch.float32).cpu().numpy()
+
+async def query_embed2graph_in_process(sequence: str, k: int = 5, min_similarity: Optional[float] = None) -> List[dict]:
+    await lazy_load_esmc_and_faiss()
+    
+    loop = asyncio.get_event_loop()
+    def run_inference():
+        q_emb = embed_single_sequence_in_process(sequence)
+        actual_k = min(k, _faiss_index.ntotal)
+        distances, indices = _faiss_index.search(q_emb, actual_k)
+        
+        results = []
+        for d, idx in zip(distances[0], indices[0]):
+            if idx == -1:
+                continue
+            t_id = _faiss_uniprot_ids[idx]
+            cosine_sim = float(d)
+            if min_similarity is not None and cosine_sim < min_similarity:
+                continue
+            results.append({
+                "target": t_id,
+                "score": cosine_sim
+            })
+        return results
+        
+    hits = await loop.run_in_executor(None, run_inference)
+    metadata_df = get_sequence_metadata_df()
+    
+    if not hits:
+        return []
+        
+    results_df = pd.DataFrame(hits)
+    sample_targets = results_df["target"].dropna().unique()
+    is_global_node_id = any(val in metadata_df["global_node_id"].values for val in sample_targets)
+    
+    def extract_uniprot_id(target_id: str) -> str:
+        if "|" in target_id:
+            parts = target_id.split("|")
+            if len(parts) >= 2:
+                return parts[1]
+        return target_id
+
+    if is_global_node_id:
+        results_df = results_df.rename(columns={"target": "global_node_id"})
+        joined_df = pd.merge(results_df, metadata_df, on="global_node_id", how="inner")
+    else:
+        results_df["uniprot_key"] = results_df["target"].apply(extract_uniprot_id)
+        joined_df = pd.merge(results_df, metadata_df, left_on="uniprot_key", right_on="uniprot_id", how="inner")
+        
+    joined_df["query"] = "query_sequence"
+    joined_df["pident"] = None
+    joined_df["evalue"] = None
+    joined_df["qcov"] = None
+    joined_df["tcov"] = None
+    joined_df["score_type"] = "cosine_similarity"
+    
+    final_cols = ["query", "uniprot_id", "pident", "evalue", "qcov", "tcov", "global_node_id", "selected_protein_name", "selected_gene_name", "selected_organism", "score", "score_type"]
+    for col in final_cols:
+        if col not in joined_df.columns:
+            joined_df[col] = None
+            
+    final_df = joined_df[final_cols]
+    return convert_dataframe_to_json(final_df)
+
+async def query_seq2graph_in_process(sequence: str, evalue: Optional[float] = None, min_seq_id: Optional[float] = None) -> List[dict]:
     query_id = uuid.uuid4().hex
     query_file = f"query_{query_id}.fasta"
     output_csv = f"bridge_output_{query_id}.csv"
     
-    try:
-        with open(query_file, "w") as f:
-            if not sequence.startswith(">"):
-                f.write(">query_sequence\n")
-            f.write(sequence)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write query sequence: {str(e)}")
-
-    import sys
-    script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    python_exe = sys.executable
+    abs_query_file = os.path.abspath(query_file)
+    abs_output_csv = os.path.abspath(output_csv)
     
+    try:
+        with open(abs_query_file, "w") as f:
+            f.write(">query_sequence\n")
+            f.write(sequence + "\n")
+            
+        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        bridge_dir = os.path.join(script_dir, "psmm", "bridges")
+        
+        from psmm.bridges.seq2graph import process_query
+        
+        loop = asyncio.get_event_loop()
+        def run_seq2graph():
+            process_query(abs_query_file, abs_output_csv, bridge_dir, evalue=evalue, min_seq_id=min_seq_id)
+            
+        await loop.run_in_executor(None, run_seq2graph)
+        
+        if os.path.exists(abs_output_csv):
+            df = pd.read_csv(abs_output_csv)
+            return convert_dataframe_to_json(df)
+        return []
+    finally:
+        if os.path.exists(abs_query_file):
+            os.remove(abs_query_file)
+        if os.path.exists(abs_output_csv):
+            os.remove(abs_output_csv)
+
+async def perform_search_internal(sequence: str, method: str, evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None) -> List[dict]:
+    # Check cache first
+    cached = await get_cached_search(sequence, method, evalue, min_seq_id, k, min_similarity)
+    if cached is not None:
+        return cached
+
+    # Dispatch to in-process execution based on method
     if method == "embed2graph":
-        module_name = "psmm.bridges.embed2graph"
+        results = await query_embed2graph_in_process(sequence, k=k if k is not None else 5, min_similarity=min_similarity)
     elif method == "seq2graph":
-        module_name = "psmm.bridges.seq2graph"
+        results = await query_seq2graph_in_process(sequence, evalue=evalue, min_seq_id=min_seq_id)
     else:
         raise HTTPException(status_code=400, detail="Invalid method. Must be 'embed2graph' or 'seq2graph'.")
 
-    # 3. Safe Subprocess Execution
-    try:
-        # Use absolute paths because CWD changes to script_dir during execution
-        abs_query_file = os.path.abspath(query_file)
-        abs_output_csv = os.path.abspath(output_csv)
-        
-        loop = asyncio.get_event_loop()
-        def run_subprocess():
-            return subprocess.run(
-                [python_exe, "-m", module_name, "--query", abs_query_file, "--output", abs_output_csv],
-                capture_output=True,
-                text=True,
-                cwd=script_dir,
-                timeout=120  # 2 minute timeout to prevent hanging the HPC server
-            )
-            
-        result = await loop.run_in_executor(None, run_subprocess)
-        
-        if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Bridge script failed: {result.stderr or result.stdout}")
-            
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Bridge script execution timed out.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to execute bridge script: {str(e)}")
-    finally:
-        # Clean up files after processing
-        if os.path.exists(query_file):
-            os.remove(query_file)
+    # Save to cache
+    await set_cached_search(sequence, method, results, evalue, min_seq_id, k, min_similarity)
+    return results
 
-    # 4. Read output and convert to JSON schema
-    if not os.path.exists(output_csv):
-        raise HTTPException(status_code=500, detail="Bridge script did not produce the expected output CSV.")
-
-    try:
-        df = pd.read_csv(output_csv)
-        response_data = convert_dataframe_to_json(df)
-        
-        # Save to cache
-        await set_cached_search(sequence, method, response_data)
-        
-        return response_data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse bridge output: {str(e)}")
-    finally:
-        if os.path.exists(output_csv):
-            os.remove(output_csv)
+def sanitize_entity(entity: dict) -> dict:
+    return {k: v for k, v in entity.items() if not k.startswith("_")}
 
 @app.post("/search", response_model=List[SearchResult])
 async def search(request: SearchRequest):
-    return await perform_search_internal(request.sequence, request.method)
+    results = await perform_search_internal(request.sequence, request.method, request.evalue, request.min_seq_id, request.k, request.min_similarity)
+    for item in results:
+        global_node_id = item.get("global_node_id")
+        if global_node_id:
+            hash_suffix = global_node_id.split(".")[-1]
+            matched = db.entities_by_hash.get(hash_suffix, [])
+            item["entities"] = [sanitize_entity(e) for e in matched]
+        else:
+            item["entities"] = []
+    return results
 
 # ==========================================
 # Expose Additional API Endpoints
@@ -1074,11 +1252,19 @@ class StatsResponse(BaseModel):
     concepts: int
     relations: int
 
+class ResolveEntitiesRequest(BaseModel):
+    terms: List[str]
+    category: str = "auto"
+
 class ExtractRequest(BaseModel):
     compounds: str = ""
     fasta: str = ""
     attributes: Optional[Dict[str, bool]] = None
     method: str = "embed2graph"
+    evalue: Optional[float] = None
+    min_seq_id: Optional[float] = None
+    k: Optional[int] = None
+    min_similarity: Optional[float] = None
 
 class ExtractResultRow(BaseModel):
     query_name: str
@@ -1102,6 +1288,24 @@ async def get_stats():
         relations=len(db.relations)
     )
 
+@app.post("/api/resolve_entities")
+async def resolve_entities(request: ResolveEntitiesRequest):
+    results = []
+    for term in request.terms:
+        matched = ranked_entity_matches(db, term, request.category)
+        if matched:
+            results.append({"term": term, "entity": sanitize_entity(matched[0])})
+    return results
+
+@app.get("/api/ontology_count")
+async def get_ontology_count():
+    oids = set()
+    for e in db.entities:
+        for oid in e.get("ontology_ids", []):
+            if oid:
+                oids.add(oid)
+    return {"count": len(oids)}
+
 @app.post("/api/extract", response_model=List[ExtractResultRow])
 async def extract(request: ExtractRequest):
     filters = request.attributes
@@ -1115,11 +1319,12 @@ async def extract(request: ExtractRequest):
             "experimental_conditions": True,
             "plant_traits": True,
             "molecular_traits": True,
+            "plant_tissues": True,
             "human_traits": True,
         }
     
     # Check cache first
-    cached = await get_cached_extract(request.compounds, request.fasta, filters, request.method)
+    cached = await get_cached_extract(request.compounds, request.fasta, filters, request.method, request.evalue, request.min_seq_id, request.k, request.min_similarity)
     if cached is not None:
         return cached
         
@@ -1141,7 +1346,7 @@ async def extract(request: ExtractRequest):
     if request.fasta:
         queries = parse_fasta_records(request.fasta)
         for q in queries:
-            search_results = await perform_search_internal(q["sequence"], request.method)
+            search_results = await perform_search_internal(q["sequence"], request.method, request.evalue, request.min_seq_id, request.k, request.min_similarity)
             for item in search_results:
                 global_node_id = item.get("global_node_id")
                 if not global_node_id:
@@ -1159,9 +1364,11 @@ async def extract(request: ExtractRequest):
     rows = relation_rows_for_query_entities(db, query_entities, filters)
     
     # Cache results
-    await set_cached_extract(request.compounds, request.fasta, filters, request.method, rows)
+    await set_cached_extract(request.compounds, request.fasta, filters, request.method, rows, request.evalue, request.min_seq_id, request.k, request.min_similarity)
     
     return rows
+
+app.mount("/api/data", StaticFiles(directory=os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data")), follow_symlink=True), name="data")
 
 @app.on_event("startup")
 async def startup_event():
@@ -1169,6 +1376,7 @@ async def startup_event():
     
     if not db_file:
         candidates = [
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data/global_path_index.json")),
             os.path.join(os.path.dirname(__file__), "../psfd-sequence-annotation-demo/data/global_path_index.json"),
             os.path.join(os.path.dirname(__file__), "PSFD/psfd-sequence-annotation-demo-main/data/global_path_index.json"),
             os.path.join(os.path.dirname(__file__), "PSFD/psfd-sequence-annotation-demo/data/global_path_index.json"),

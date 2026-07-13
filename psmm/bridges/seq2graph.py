@@ -199,13 +199,15 @@ def clean_tmp_files(script_dir: str) -> None:
                 except Exception as e:
                     print(f"Warning: Failed to remove temporary file {f}: {e}", file=sys.stderr)
 
-def run_single_query(query_path: str, script_dir: str) -> pd.DataFrame:
+def run_single_query(query_path: str, script_dir: str, evalue: float = None, min_seq_id: float = None) -> pd.DataFrame:
     """
     Run the MMseqs2 alignment search pipeline for a single query FASTA file.
 
     Args:
         query_path: Path to the query FASTA file.
         script_dir: Directory where the script runs.
+        evalue: Expectation value threshold.
+        min_seq_id: Minimum sequence identity threshold.
 
     Returns:
         DataFrame containing the raw alignment outputs.
@@ -239,6 +241,11 @@ def run_single_query(query_path: str, script_dir: str) -> pd.DataFrame:
         results_db,
         tmp_dir
     ]
+    if evalue is not None:
+        search_cmd.extend(["-e", str(evalue)])
+    if min_seq_id is not None:
+        search_cmd.extend(["--min-seq-id", str(min_seq_id)])
+        
     print(f"Running MMseqs2 sequence search for '{os.path.basename(query_path)}'...")
     run_command(search_cmd, cwd=script_dir)
 
@@ -263,7 +270,7 @@ def run_single_query(query_path: str, script_dir: str) -> pd.DataFrame:
     alignment_cols = ["query", "target", "pident", "evalue", "qcov", "tcov"]
     return pd.read_csv(output_hits_abs, sep="\t", names=alignment_cols)
 
-def process_query(query_path: str, output_path: str, script_dir: str) -> None:
+def process_query(query_path: str, output_path: str, script_dir: str, evalue: float = None, min_seq_id: float = None) -> None:
     """
     Process the query sequence (or directory of sequences): search against reference database,
     convert alignment, perform relational join with metadata, and serialize output.
@@ -272,6 +279,8 @@ def process_query(query_path: str, output_path: str, script_dir: str) -> None:
         query_path: Absolute path to the query FASTA file or directory containing FASTA files.
         output_path: Absolute path to the output CSV file.
         script_dir: Absolute path to the script directory.
+        evalue: Expectation value threshold.
+        min_seq_id: Minimum sequence identity threshold.
     """
     # 1. Collect all query files to process
     query_files = []
@@ -298,7 +307,7 @@ def process_query(query_path: str, output_path: str, script_dir: str) -> None:
     all_alignments = []
     for f in query_files:
         print(f"Processing query file: {f}")
-        df = run_single_query(f, script_dir)
+        df = run_single_query(f, script_dir, evalue=evalue, min_seq_id=min_seq_id)
         if not df.empty:
             all_alignments.append(df)
 
@@ -402,9 +411,16 @@ def main() -> None:
         help="Path to the query protein sequence FASTA file or folder (default: input_FASTA)."
     )
     parser.add_argument(
-        "--output",
-        type=str,
-        help="Path to the output CSV file (default: output/blast_query_results.csv)."
+        "--evalue",
+        type=float,
+        default=None,
+        help="MMseqs2 search expectation value threshold (default: 0.001)."
+    )
+    parser.add_argument(
+        "--min-seq-id",
+        type=float,
+        default=None,
+        help="MMseqs2 search minimum sequence identity threshold (0.0 to 1.0)."
     )
 
     args = parser.parse_args()
@@ -437,7 +453,7 @@ def main() -> None:
     else:
         output_abs = os.path.join(script_dir, "output", "blast_query_results.csv")
 
-    process_query(query_abs, output_abs, script_dir)
+    process_query(query_abs, output_abs, script_dir, evalue=args.evalue, min_seq_id=args.min_seq_id)
 
 if __name__ == "__main__":
     main()
