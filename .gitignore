@@ -35,3 +35,10 @@ logs/
 # ==========================================
 .DS_Store
 Thumbs.db
+
+# Benchmarking
+data/benchmark_targets/
+data/benchmark_queries/
+data/benchmark_results.csv
+data/test_benchmark_results.csv
+

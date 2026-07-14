@@ -422,6 +422,12 @@ def main() -> None:
         default=None,
         help="MMseqs2 search minimum sequence identity threshold (0.0 to 1.0)."
     )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Path to the output CSV file."
+    )
 
     args = parser.parse_args()
 
