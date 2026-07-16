@@ -391,6 +391,7 @@ class PSFDDatabase:
         self.entities_by_hash = defaultdict(list)
         self.entities_by_category = defaultdict(list)
         self.concepts_count = 0
+        self.enriched_traits = []
         
     def load_database(self, filepath: str):
         if not os.path.exists(filepath):
@@ -410,6 +411,7 @@ class PSFDDatabase:
                 self.entities_by_hash = cached_data.get("entities_by_hash", defaultdict(list))
                 self.entities_by_category = cached_data.get("entities_by_category", defaultdict(list))
                 self.concepts_count = cached_data.get("concepts_count", 0)
+                self.enriched_traits = cached_data.get("enriched_traits", [])
                 print(f"Database loaded from cache successfully: {len(self.entities)} entities, {self.concepts_count} concepts, {len(self.relations)} relations.")
                 return
             except Exception as e:
@@ -490,6 +492,17 @@ class PSFDDatabase:
                     self.entities_by_category[cat].append(ent)
                 
         self.concepts_count = len(concepts)
+        
+        enriched_traits_dict = {}
+        for ent in self.entities:
+            for enr in ent.get("enrichments", []):
+                trait_concept = enr.get("trait_concept")
+                trait_label = enr.get("trait_label")
+                if trait_concept and trait_concept not in enriched_traits_dict:
+                    enriched_traits_dict[trait_concept] = trait_label
+                    
+        self.enriched_traits = [{"ontology_id": k, "label": v} for k, v in enriched_traits_dict.items()]
+        self.enriched_traits.sort(key=lambda x: str(x.get("label", "")).lower())
             
         # Index relations
         for rel in self.relations:
@@ -512,7 +525,8 @@ class PSFDDatabase:
                 "relations_by_entity": self.relations_by_entity,
                 "entities_by_hash": self.entities_by_hash,
                 "entities_by_category": self.entities_by_category,
-                "concepts_count": self.concepts_count
+                "concepts_count": self.concepts_count,
+                "enriched_traits": self.enriched_traits
             }
             with open(pickle_path, "wb") as f:
                 pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1305,6 +1319,10 @@ async def get_ontology_count():
             if oid:
                 oids.add(oid)
     return {"count": len(oids)}
+
+@app.get("/api/enriched_traits")
+async def get_enriched_traits():
+    return db.enriched_traits
 
 @app.post("/api/extract", response_model=List[ExtractResultRow])
 async def extract(request: ExtractRequest):

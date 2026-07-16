@@ -239,7 +239,8 @@ def run_single_query(query_path: str, script_dir: str, evalue: float = None, min
         tmp_query_db,
         db_path,
         results_db,
-        tmp_dir
+        tmp_dir,
+        "-s", "7.5"
     ]
     if evalue is not None:
         search_cmd.extend(["-e", str(evalue)])
