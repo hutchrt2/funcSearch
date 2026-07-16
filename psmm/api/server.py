@@ -37,15 +37,15 @@ async def set_cached_search(sequence: str, method: str, results: List[dict], eva
 _extract_cache = {}
 _extract_cache_lock = asyncio.Lock()
 
-async def get_cached_extract(compounds: str, fasta: str, attributes: dict, method: str, evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None):
+async def get_cached_extract(compounds: str, fasta: str, enrichments: str, attributes: dict, method: str, evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None):
     frozen_attrs = tuple(sorted(attributes.items())) if attributes else ()
-    key = (compounds.strip(), fasta.strip(), frozen_attrs, method, evalue, min_seq_id, k, min_similarity)
+    key = (compounds.strip(), fasta.strip(), enrichments.strip(), frozen_attrs, method, evalue, min_seq_id, k, min_similarity)
     async with _extract_cache_lock:
         return _extract_cache.get(key)
 
-async def set_cached_extract(compounds: str, fasta: str, attributes: dict, method: str, results: List[dict], evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None):
+async def set_cached_extract(compounds: str, fasta: str, enrichments: str, attributes: dict, method: str, results: List[dict], evalue: Optional[float] = None, min_seq_id: Optional[float] = None, k: Optional[int] = None, min_similarity: Optional[float] = None):
     frozen_attrs = tuple(sorted(attributes.items())) if attributes else ()
-    key = (compounds.strip(), fasta.strip(), frozen_attrs, method, evalue, min_seq_id, k, min_similarity)
+    key = (compounds.strip(), fasta.strip(), enrichments.strip(), frozen_attrs, method, evalue, min_seq_id, k, min_similarity)
     async with _extract_cache_lock:
         if len(_extract_cache) > 1000:
             _extract_cache.clear()
@@ -1270,9 +1270,13 @@ class ResolveEntitiesRequest(BaseModel):
     terms: List[str]
     category: str = "auto"
 
+class SearchByEnrichmentRequest(BaseModel):
+    term: str
+
 class ExtractRequest(BaseModel):
     compounds: str = ""
     fasta: str = ""
+    enrichments: str = ""
     attributes: Optional[Dict[str, bool]] = None
     method: str = "embed2graph"
     evalue: Optional[float] = None
@@ -1311,6 +1315,34 @@ async def resolve_entities(request: ResolveEntitiesRequest):
             results.append({"term": term, "entity": sanitize_entity(matched[0])})
     return results
 
+@app.post("/api/search_by_enrichment", response_model=List[SearchResult])
+async def search_by_enrichment(request: SearchByEnrichmentRequest):
+    term = request.term.lower()
+    results = []
+    for entity in db.entities:
+        enrichments = entity.get("enrichments", [])
+        for e in enrichments:
+            trait_label = e.get("trait_label", "").lower()
+            trait_concept = e.get("trait_concept", "").lower()
+            if term in trait_label or term in trait_concept:
+                uniprot_id = ""
+                for oid in entity.get("ontology_ids", []):
+                    if oid.startswith("UniProt:"):
+                        uniprot_id = oid.split(":")[-1]
+                        break
+                results.append(SearchResult(
+                    query=request.term,
+                    target=entity.get("node_id", ""),
+                    uniprot_id=uniprot_id,
+                    score=1.0,
+                    score_type="enrichment_match",
+                    search_method="enrichment",
+                    global_node_id=entity.get("node_id", ""),
+                    entities=[sanitize_entity(entity)]
+                ))
+                break
+    return results
+
 @app.get("/api/ontology_count")
 async def get_ontology_count():
     oids = set()
@@ -1342,7 +1374,7 @@ async def extract(request: ExtractRequest):
         }
     
     # Check cache first
-    cached = await get_cached_extract(request.compounds, request.fasta, filters, request.method, request.evalue, request.min_seq_id, request.k, request.min_similarity)
+    cached = await get_cached_extract(request.compounds, request.fasta, request.enrichments, filters, request.method, request.evalue, request.min_seq_id, request.k, request.min_similarity)
     if cached is not None:
         return cached
         
@@ -1378,11 +1410,28 @@ async def extract(request: ExtractRequest):
                         "source": "fasta"
                     })
                     
-    # 3. Extract relations
+    # 3. Process Enrichments
+    if request.enrichments:
+        terms = unique_strings_list(re.split(r'[\n;,]+', request.enrichments))
+        for term in terms:
+            t = term.lower()
+            for entity in db.entities:
+                for e in entity.get("enrichments", []):
+                    trait_label = e.get("trait_label", "").lower()
+                    trait_concept = e.get("trait_concept", "").lower()
+                    if t in trait_label or t in trait_concept:
+                        query_entities.append({
+                            "query_name": term,
+                            "entity": entity,
+                            "source": "enrichment"
+                        })
+                        break
+
+    # 4. Extract relations
     rows = relation_rows_for_query_entities(db, query_entities, filters)
     
     # Cache results
-    await set_cached_extract(request.compounds, request.fasta, filters, request.method, rows, request.evalue, request.min_seq_id, request.k, request.min_similarity)
+    await set_cached_extract(request.compounds, request.fasta, request.enrichments, filters, request.method, rows, request.evalue, request.min_seq_id, request.k, request.min_similarity)
     
     return rows
 
