@@ -393,6 +393,79 @@ class PSFDDatabase:
         self.concepts_count = 0
         self.enriched_traits = []
         
+    def _normalize_and_categorize_enrichments(self):
+        def get_enrichment_category(ontology_id: str, label: str) -> str:
+            oid = str(ontology_id or "").upper().strip()
+            lbl = str(label or "").lower()
+            if oid.startswith("GO:"):
+                # Rough categorization for GO namespaces based on label keywords
+                if any(word in lbl for word in ["activity", "binding", "synthase", "deaminase", "transporter", "catalytic", "kinase", "receptor", "inhibitor"]):
+                    return "molecular_traits"
+                elif any(word in lbl for word in ["process", "pathway", "biosynthesis", "metabolism", "catabolism", "regulation", "response to", "signaling", "transport"]):
+                    return "pathways"
+                elif any(word in lbl for word in ["membrane", "component", "nucleus", "plastid", "chloroplast", "envelope", "wall", "lumen", "ribosome"]):
+                    return "tissues"
+                return "molecular_traits"
+            elif oid.startswith("TO:"):
+                return "plant_traits"
+            elif oid.startswith("PO:"):
+                return "tissues"
+            elif oid.startswith("CHEBI:") or oid.startswith("PLANTCYC:") or oid.startswith("KEGG:") or "CYC" in oid:
+                return "metabolites"
+            elif oid.startswith("NCBITAXON:") or oid.startswith("TAXON:"):
+                return "species"
+            elif oid.startswith("EO:") or oid.startswith("PECO:"):
+                return "experimental_conditions"
+            elif oid.startswith("MONDO:") or oid.startswith("HP:"):
+                return "human_traits"
+            else:
+                if "trait" in lbl or "phenotype" in lbl:
+                    return "plant_traits"
+                if "tissue" in lbl or "cell" in lbl or "organ" in lbl:
+                    return "tissues"
+                if "pathway" in lbl or "cycle" in lbl:
+                    return "pathways"
+                return "molecular_traits"
+
+        def clean_label(l: str) -> str:
+            if not l:
+                return ""
+            l = l.strip().rstrip(".")
+            # Capitalize first letter
+            if len(l) > 0:
+                l = l[0].upper() + l[1:]
+            return l
+
+        # Group and normalize
+        enriched_traits_dict = {}
+        for ent in self.entities:
+            normalized_enrichments = []
+            for enr in ent.get("enrichments", []):
+                trait_concept = enr.get("trait_concept")
+                trait_label = enr.get("trait_label")
+                if not trait_concept:
+                    continue
+                
+                cleaned = clean_label(trait_label)
+                category = get_enrichment_category(trait_concept, cleaned)
+                
+                enr["trait_label"] = cleaned
+                enr["category"] = category
+                
+                if trait_concept not in enriched_traits_dict:
+                    enriched_traits_dict[trait_concept] = {
+                        "label": cleaned,
+                        "category": category
+                    }
+                normalized_enrichments.append(enr)
+            ent["enrichments"] = normalized_enrichments
+                    
+        self.enriched_traits = [
+            {"ontology_id": k, "label": v["label"], "category": v["category"]} 
+            for k, v in enriched_traits_dict.items()
+        ]
+        self.enriched_traits.sort(key=lambda x: str(x.get("label", "")).lower())
+
     def load_database(self, filepath: str):
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Database file not found at: {filepath}")
@@ -413,10 +486,37 @@ class PSFDDatabase:
                 self.concepts_count = cached_data.get("concepts_count", 0)
                 self.enriched_traits = cached_data.get("enriched_traits", [])
                 print(f"Database loaded from cache successfully: {len(self.entities)} entities, {self.concepts_count} concepts, {len(self.relations)} relations.")
+                
+                # Check if cache has category in enrichments. If not, recompute and update pickle.
+                needs_enrichment_processing = True
+                if self.enriched_traits and len(self.enriched_traits) > 0:
+                    if "category" in self.enriched_traits[0]:
+                        needs_enrichment_processing = False
+                
+                if needs_enrichment_processing:
+                    print("Caching does not have categories. Processing enrichments post-load...")
+                    self._normalize_and_categorize_enrichments()
+                    # Re-save to pickle
+                    try:
+                        cache_data = {
+                            "entities": self.entities,
+                            "relations": self.relations,
+                            "entity_by_id": self.entity_by_id,
+                            "relations_by_entity": self.relations_by_entity,
+                            "entities_by_hash": self.entities_by_hash,
+                            "entities_by_category": self.entities_by_category,
+                            "concepts_count": self.concepts_count,
+                            "enriched_traits": self.enriched_traits
+                        }
+                        with open(pickle_path, "wb") as f:
+                            pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        print("Pickle cache updated with enrichment categories.")
+                    except Exception as ex:
+                        print(f"Warning: Failed to update database pickle cache: {ex}")
                 return
             except Exception as e:
                 print(f"Warning: Failed to load database pickle cache: {e}. Falling back to JSON parsing...")
-
+ 
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
             
@@ -493,16 +593,7 @@ class PSFDDatabase:
                 
         self.concepts_count = len(concepts)
         
-        enriched_traits_dict = {}
-        for ent in self.entities:
-            for enr in ent.get("enrichments", []):
-                trait_concept = enr.get("trait_concept")
-                trait_label = enr.get("trait_label")
-                if trait_concept and trait_concept not in enriched_traits_dict:
-                    enriched_traits_dict[trait_concept] = trait_label
-                    
-        self.enriched_traits = [{"ontology_id": k, "label": v} for k, v in enriched_traits_dict.items()]
-        self.enriched_traits.sort(key=lambda x: str(x.get("label", "")).lower())
+        self._normalize_and_categorize_enrichments()
             
         # Index relations
         for rel in self.relations:
@@ -511,9 +602,15 @@ class PSFDDatabase:
             context_ids = rel.get("context_entity_ids", [])
             
             all_associated_ids = set(subject_ids + object_ids + context_ids)
+            all_associated_keys = set(all_associated_ids)
             for eid in all_associated_ids:
-                if eid:
-                    self.relations_by_entity[eid].append(rel)
+                ent = self.entity_by_id.get(eid)
+                if ent and ent.get("ontology_id"):
+                    all_associated_keys.add(ent["ontology_id"])
+                    
+            for key in all_associated_keys:
+                if key:
+                    self.relations_by_entity[key].append(rel)
 
         print(f"Saving parsed database to pickle cache: {pickle_path}...")
         try:
@@ -547,8 +644,25 @@ class PSFDDatabase:
 # Instantiate Global DB
 db = PSFDDatabase()
 
-def relation_has_endpoint(rel, entity_id: str) -> bool:
-    return entity_id in relation_global_subject_ids(rel) or entity_id in relation_global_object_ids(rel)
+def relation_global_context_ids(rel) -> list:
+    ids = as_list(rel.get("context_entity_ids")) + as_list(rel.get("context_entity_id"))
+    return list(set([str(x) for x in ids if x]))
+
+def relation_has_entity(db, rel, query_entity: dict) -> bool:
+    q_nid = query_entity.get("id") or query_entity.get("node_id")
+    q_oid = query_entity.get("ontology_id")
+    
+    rel_nids = relation_global_subject_ids(rel) + relation_global_object_ids(rel) + relation_global_context_ids(rel)
+    if q_nid and q_nid in rel_nids:
+        return True
+        
+    if q_oid:
+        for n in rel_nids:
+            ent = db.entity_by_id.get(n)
+            if ent and ent.get("ontology_id") == q_oid:
+                return True
+                
+    return False
 
 def relation_global_subject_ids(rel) -> list:
     ids = as_list(rel.get("subject_entity_ids")) + as_list(rel.get("subject_entity_id"))
@@ -686,6 +800,12 @@ def is_useful_annotation_context(entity) -> bool:
         "cellular_component",
         "developmental_stage",
         "assay_method",
+        "plant_trait",
+        "molecular_trait",
+        "pathway",
+        "process",
+        "phenotype",
+        "disease"
     }
 
 def annotation_ontology_ids(entity) -> list:
@@ -863,52 +983,71 @@ def normalized_entity_for_relation(entity) -> str:
     first_id = ids[0] if ids else "unresolved"
     return f"{path_entity_name(entity)}|{first_id}"
 
-def relation_extraction_row(db, query_name: str, query_entity: dict, rel: dict, attr_filters: dict) -> dict:
+def relation_extraction_rows(db, query_name: str, query_entity: dict, rel: dict, attr_filters: dict) -> list:
     subject = db.entity_by_id.get(rel.get("subject_entity_id"))
     obj = db.entity_by_id.get(rel.get("object_entity_id"))
     if not subject or not obj:
-        return None
+        return []
     
     query_entity_id = query_entity.get("id") or query_entity.get("node_id")
     query_is_subject = query_entity_id in relation_global_subject_ids(rel)
     query_is_object = query_entity_id in relation_global_object_ids(rel)
+    query_is_context = query_entity_id in relation_global_context_ids(rel)
     
-    other = obj if (query_is_subject and not query_is_object) else subject
-    attribute = relation_attribute_category(other)
-    if not attribute:
-        return None
+    rows = []
+    
+    def build_row(other):
+        attribute = relation_attribute_category(other)
+        if not attribute:
+            return None
+            
+        attr_key = attribute["key"]
+        if not attr_filters.get(attr_key, False):
+            return None
+            
+        predicate = clean_predicate(rel.get("predicate") or rel.get("predicate_class") or "relates to")
         
-    attr_key = attribute["key"]
-    if not attr_filters.get(attr_key, False):
-        return None
+        contexts = []
+        for item in annotation_relation_context_entities(db, rel):
+            lbl = item["label"]
+            oid = item["ontologyId"]
+            contexts.append(f"{lbl} ({oid})" if oid else lbl)
+        context_str = "; ".join(unique_strings_list(contexts))
         
-    predicate = clean_predicate(rel.get("predicate") or rel.get("predicate_class") or "relates to")
-    
-    contexts = []
-    for item in annotation_relation_context_entities(db, rel):
-        lbl = item["label"]
-        oid = item["ontologyId"]
-        contexts.append(f"{lbl} ({oid})" if oid else lbl)
-    context_str = "; ".join(unique_strings_list(contexts))
-    
-    event_taxon_tissue_context = relation_taxon_tissue_display(rel, "event")
-    entity_linked_taxon_tissue_context = relation_taxon_tissue_display(rel, "entity_linked")
-    overlap_taxon_tissue_context = relation_taxon_tissue_overlap_display(rel)
-    
-    return {
-        "query_name": path_entity_name(query_entity) or query_name,
-        "pmcid": rel.get("pmcid") or "",
-        "relation_id": rel.get("id"),
-        "attribute_entity_id": other.get("id") or other.get("node_id"),
-        "attribute_key": attr_key,
-        "relation": f"{path_entity_name(subject)} {predicate} {path_entity_name(obj)}",
-        "context": context_str,
-        "event_taxon_tissue_context": event_taxon_tissue_context,
-        "entity_linked_taxon_tissue_context": entity_linked_taxon_tissue_context,
-        "overlap_taxon_tissue_context": overlap_taxon_tissue_context,
-        "attribute_type": attribute["label"],
-        "normalized_relation": f"{normalized_entity_for_relation(subject)} {predicate} {normalized_entity_for_relation(obj)}",
-    }
+        event_taxon_tissue_context = relation_taxon_tissue_display(rel, "event")
+        entity_linked_taxon_tissue_context = relation_taxon_tissue_display(rel, "entity_linked")
+        overlap_taxon_tissue_context = relation_taxon_tissue_overlap_display(rel)
+        
+        return {
+            "query_name": path_entity_name(query_entity) or query_name,
+            "pmcid": rel.get("pmcid") or "",
+            "relation_id": rel.get("id"),
+            "attribute_entity_id": other.get("id") or other.get("node_id"),
+            "attribute_key": attr_key,
+            "subject_name": path_entity_name(subject),
+            "predicate": predicate,
+            "object_name": path_entity_name(obj),
+            "relation": f"{path_entity_name(subject)} {predicate} {path_entity_name(obj)}",
+            "context": context_str,
+            "event_taxon_tissue_context": event_taxon_tissue_context,
+            "entity_linked_taxon_tissue_context": entity_linked_taxon_tissue_context,
+            "overlap_taxon_tissue_context": overlap_taxon_tissue_context,
+            "attribute_type": attribute["label"],
+            "normalized_relation": f"{normalized_entity_for_relation(subject)} {predicate} {normalized_entity_for_relation(obj)}",
+        }
+        
+    if query_is_subject or query_is_object:
+        other = obj if (query_is_subject and not query_is_object) else subject
+        row = build_row(other)
+        if row: rows.append(row)
+    elif query_is_context:
+        # Emit two rows: one for subject as attribute, one for object as attribute
+        row1 = build_row(subject)
+        if row1: rows.append(row1)
+        row2 = build_row(obj)
+        if row2: rows.append(row2)
+        
+    return rows
 
 def relation_rows_for_query_entities(db, query_entities: list, attr_filters: dict) -> list:
     seen = set()
@@ -919,20 +1058,24 @@ def relation_rows_for_query_entities(db, query_entities: list, attr_filters: dic
         if not entity:
             continue
         ent_id = entity.get("id") or entity.get("node_id")
-        if not ent_id:
+        ont_id = entity.get("ontology_id")
+        if not ent_id and not ont_id:
             continue
-        relations = db.relations_by_entity.get(ent_id) or []
-        for rel in relations:
-            if not relation_has_endpoint(rel, ent_id):
+            
+        rel_list = list(db.relations_by_entity.get(ent_id) or [])
+        if ont_id:
+            rel_list.extend(db.relations_by_entity.get(ont_id) or [])
+            
+        for rel in rel_list:
+            if not relation_has_entity(db, rel, entity):
                 continue
-            row = relation_extraction_row(db, query_name, entity, rel, attr_filters)
-            if not row:
-                continue
-            key = f"{row['query_name']}|{row['relation_id']}|{row['attribute_entity_id']}"
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append(row)
+            extracted_rows = relation_extraction_rows(db, query_name, entity, rel, attr_filters)
+            for row in extracted_rows:
+                key = f"{row['query_name']}|{row['relation_id']}|{row['attribute_entity_id']}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
             
     attribute_rank = [
         "genes", "metabolites", "pathways", "tissues", "species", 
@@ -1330,14 +1473,15 @@ async def search_by_enrichment(request: SearchByEnrichmentRequest):
                     if oid.startswith("UniProt:"):
                         uniprot_id = oid.split(":")[-1]
                         break
+                stable_id = entity.get("node_id") or entity.get("id") or ""
                 results.append(SearchResult(
                     query=request.term,
-                    target=entity.get("node_id", ""),
+                    target=stable_id,
                     uniprot_id=uniprot_id,
                     score=1.0,
                     score_type="enrichment_match",
                     search_method="enrichment",
-                    global_node_id=entity.get("node_id", ""),
+                    global_node_id=stable_id,
                     entities=[sanitize_entity(entity)]
                 ))
                 break
@@ -1384,7 +1528,7 @@ async def extract(request: ExtractRequest):
     if request.compounds:
         terms = unique_strings_list(re.split(r'[\n;,]+', request.compounds))
         for term in terms:
-            matched = ranked_entity_matches(db, term, "compound")
+            matched = ranked_entity_matches(db, term, "auto")
             if matched:
                 query_entities.append({
                     "query_name": term,
@@ -1421,7 +1565,7 @@ async def extract(request: ExtractRequest):
                     trait_concept = e.get("trait_concept", "").lower()
                     if t in trait_label or t in trait_concept:
                         query_entities.append({
-                            "query_name": term,
+                            "query_name": path_entity_name(entity),
                             "entity": entity,
                             "source": "enrichment"
                         })

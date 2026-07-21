@@ -39,7 +39,6 @@ def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[s
         node_ids = [n for n in node_ids if n]
         
         rel_concepts = {node_to_concept[n] for n in node_ids if n in node_to_concept}
-        
         g_c = rel_concepts & gene_concepts
         t_c = rel_concepts & trait_concepts
         
@@ -91,6 +90,8 @@ def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[s
         if concept and concept in significant_pairs:
             sorted_enrichments = sorted(significant_pairs[concept], key=lambda x: x["fdr"])
             e["enrichments"] = sorted_enrichments
+        else:
+            e["enrichments"] = []
 
 
 def main():

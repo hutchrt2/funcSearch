@@ -31,10 +31,10 @@ def main():
     
     # Create a mapping of uniprot_id to ground truth protein name
     ground_truth = {}
-    if not meta_df.empty and 'target_accession' in meta_df.columns and 'protein_name' in meta_df.columns:
+    if not meta_df.empty and 'target_accession' in meta_df.columns and 'selected_protein_name' in meta_df.columns:
         for _, row in meta_df.iterrows():
             uid = str(row['target_accession']).upper()
-            ground_truth[uid] = str(row['protein_name'])
+            ground_truth[uid] = str(row['selected_protein_name'])
             
     print(f"Loaded {len(ground_truth)} ground truth labels.")
     
