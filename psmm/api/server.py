@@ -319,7 +319,7 @@ def entity_matches_annotation_category(entity, category: str = "auto") -> bool:
         return bool(profile) or len(gene_protein_ontology_ids(entity)) > 0
     return False
 
-def ranked_entity_matches(db, term: str, category: str = "auto") -> list:
+def ranked_entity_matches_with_scores(db, term: str, category: str = "auto") -> list:
     query = str(term or "").strip().lower()
     if not query:
         return []
