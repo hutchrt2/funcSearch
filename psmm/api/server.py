@@ -376,7 +376,10 @@ def ranked_entity_matches(db, term: str, category: str = "auto") -> list:
             matches.append((entity, score))
             
     matches.sort(key=lambda x: (-x[1], x[0]["_clean_name"]))
-    return [m[0] for m in matches]
+    return matches
+
+def ranked_entity_matches(db, term: str, category: str = "auto") -> list:
+    return [m[0] for m in ranked_entity_matches_with_scores(db, term, category)]
 
 # ==========================================
 # Database & Relationship Extraction Core
@@ -1453,9 +1456,16 @@ async def get_stats():
 async def resolve_entities(request: ResolveEntitiesRequest):
     results = []
     for term in request.terms:
-        matched = ranked_entity_matches(db, term, request.category)
+        matched = ranked_entity_matches_with_scores(db, term, request.category)
         if matched:
-            results.append({"term": term, "entity": sanitize_entity(matched[0])})
+            top_score = matched[0][1]
+            surviving = [m[0] for m in matched if m[1] == top_score]
+            seen_ontologies = set()
+            for m in surviving:
+                oid = m.get("ontology_id") or m.get("id")
+                if oid not in seen_ontologies:
+                    seen_ontologies.add(oid)
+                    results.append({"term": term, "entity": sanitize_entity(m)})
     return results
 
 @app.post("/api/search_by_enrichment", response_model=List[SearchResult])
@@ -1528,13 +1538,20 @@ async def extract(request: ExtractRequest):
     if request.compounds:
         terms = unique_strings_list(re.split(r'[\n;,]+', request.compounds))
         for term in terms:
-            matched = ranked_entity_matches(db, term, "auto")
+            matched = ranked_entity_matches_with_scores(db, term, "auto")
             if matched:
-                query_entities.append({
-                    "query_name": term,
-                    "entity": matched[0],
-                    "source": "compound"
-                })
+                top_score = matched[0][1]
+                surviving = [m[0] for m in matched if m[1] == top_score]
+                seen_ontologies = set()
+                for m in surviving:
+                    oid = m.get("ontology_id") or m.get("id")
+                    if oid not in seen_ontologies:
+                        seen_ontologies.add(oid)
+                        query_entities.append({
+                            "query_name": term,
+                            "entity": m,
+                            "source": "compound"
+                        })
                 
     # 2. Process FASTA
     if request.fasta:
