@@ -1603,20 +1603,7 @@ async def startup_event():
     db_file = os.environ.get("PSFD_DB_FILE")
     
     if not db_file:
-        candidates = [
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data/global_path_index.json")),
-            os.path.join(os.path.dirname(__file__), "../psfd-sequence-annotation-demo/data/global_path_index.json"),
-            os.path.join(os.path.dirname(__file__), "PSFD/psfd-sequence-annotation-demo-main/data/global_path_index.json"),
-            os.path.join(os.path.dirname(__file__), "PSFD/psfd-sequence-annotation-demo/data/global_path_index.json"),
-            "/local/storage/thomas/psfd-sequence-annotation-demo-copy/data/global_path_index.json",
-            "/local/storage/thomas/psfd-sequence-annotation-demo/data/global_path_index.json",
-        ]
-        for path in candidates:
-            if os.path.exists(path):
-                db_file = path
-                break
-        if not db_file:
-            db_file = "/local/storage/thomas/psfd-sequence-annotation-demo/data/global_path_index.json"
+        db_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data/global_path_index.json"))
 
     print(f"Loading PSFD database from {db_file}...")
     try:

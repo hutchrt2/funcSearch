@@ -101,7 +101,7 @@ pip install -r requirements.txt
 Sequentially loads normalization data, fetches sequences, and builds both MMseqs2 and FAISS indexes:
 
 ```bash
-./scripts/full_rebuild_pipeline.sh
+./psmm.py rebuild
 ```
 
 Pipeline stages:
@@ -113,7 +113,7 @@ Pipeline stages:
 ### 3. Launch the API Server
 
 ```bash
-./scripts/start_api.sh
+./psmm.py serve --port 8999
 ```
 
 The server starts on port **8999** by default and exposes the following endpoints:
@@ -129,10 +129,26 @@ The server starts on port **8999** by default and exposes the following endpoint
 
 ### 4. Benchmarking
 
-The `benchmark_masking.py` script supports controlled evaluation by masking known entities from the databases and measuring retrieval accuracy:
+The system supports controlled evaluation by masking known entities from the databases and measuring retrieval accuracy:
 
 ```bash
-python -m scripts.benchmark_masking --help
+./psmm.py benchmark run --help
+./psmm.py benchmark evaluate
+```
+
+### 5. Enrichments
+
+Run pathway enrichment tests directly on the knowledge graph using the unified CLI:
+
+```bash
+# Calculate and add enrichments to global_path_index.json
+./psmm.py enrich calculate --db data/global_path_index.json
+
+# Export global enrichments to CSV
+./psmm.py enrich export --output enrichments_export.csv
+
+# Update individual paper JSON files with enrichments
+./psmm.py enrich update-papers
 ```
 
 ---
@@ -174,10 +190,5 @@ curl -X POST http://localhost:8999/api/extract \
 
 Raw datasets, sequence FASTAs, model weights, vector indexes, and the knowledge graph database are **strictly excluded** from version control. Only source code, pipeline scripts, and configuration are tracked. The `data/` directory is fully gitignored.
 
----
+Additionally, the `input/` directory is provided as a blank template. Its contents are gitignored except for a `.gitkeep` file to prevent accidental uploads of confidential sequences or datasets.
 
-## Authors & Contributions
-
-Developed for the [Plant Stress Functional Database (PSFD)](https://plantstress.cornell.edu/) to accelerate agricultural and biochemical mechanisms discovery.
-
-**Thomas Hutchinson** — Cornell University, BioHPC

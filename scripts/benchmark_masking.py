@@ -381,10 +381,15 @@ def benchmark_query(project_dir: str, method: str, query_header: str, query_seq:
         return df
     return pd.DataFrame()
 
-def run_benchmark(project_dir: str, folder_path: str, output_path: str, methods: list):
-    fasta_files = glob.glob(os.path.join(folder_path, "*.fasta")) + glob.glob(os.path.join(folder_path, "*.fa")) + glob.glob(os.path.join(folder_path, "*.faa"))
+def run_benchmark(project_dir: str, query_input: str, output_path: str, methods: list):
+    fasta_files = []
+    if os.path.isdir(query_input):
+        fasta_files = glob.glob(os.path.join(query_input, "*.fasta")) + glob.glob(os.path.join(query_input, "*.fa")) + glob.glob(os.path.join(query_input, "*.faa"))
+    elif os.path.isfile(query_input):
+        fasta_files = [query_input]
+        
     if not fasta_files:
-        print(f"No FASTA files found in {folder_path}")
+        print(f"No FASTA files found for input: {query_input}")
         return
         
     all_sequences = []
@@ -394,10 +399,14 @@ def run_benchmark(project_dir: str, folder_path: str, output_path: str, methods:
             header = record.description
             seq_str = str(record.seq)
             uid = record.id
-            if "|" in record.id:
-                parts = record.id.split("|")
+            if "|" in record.description:
+                parts = record.description.split("|")
                 if len(parts) >= 2:
-                    uid = parts[1]
+                    db_acc = parts[1].strip()
+                    if ":" in db_acc:
+                        uid = db_acc.split(":")[1].strip()
+                    else:
+                        uid = db_acc.strip()
             all_sequences.append({
                 "file_name": filename,
                 "header": header,
@@ -469,10 +478,74 @@ def run_benchmark(project_dir: str, folder_path: str, output_path: str, methods:
     else:
         print("\n[Warning] No benchmark results generated.")
 
+def auto_sample_queries(project_dir: str, n: int) -> str:
+    print(f"Auto-sampling {n} queries from the database...")
+    import json
+    import random
+    meta_path = os.path.join(project_dir, "data", "build", "sequence_metadata.csv")
+    db_path = os.path.join(project_dir, "data", "global_path_index.json")
+    fasta_path = os.path.join(project_dir, "data", "build", "psfd_sequences.fasta")
+    
+    if not os.path.exists(meta_path) or not os.path.exists(db_path):
+        print("Error: Missing metadata or global index.")
+        sys.exit(1)
+        
+    print("Loading global index to find nodes with context...")
+    with open(db_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        
+    nodes_with_context = set()
+    for rel in data.get("relations", []):
+        sub = rel.get("subject_entity_id")
+        obj = rel.get("object_entity_id")
+        ctx = rel.get("context_entity_ids", [])
+        nids = [nid for nid in [sub, obj] + (ctx or []) if nid]
+        for nid in nids:
+            g_node = "global.entity." + nid.split(".entity.")[-1] if ".entity." in nid else nid
+            nodes_with_context.add(g_node)
+            
+    print("Loading metadata to map valid UniProt IDs...")
+    df = pd.read_csv(meta_path)
+    valid_uids = []
+    for _, row in df.iterrows():
+        if str(row.get("global_node_id")) in nodes_with_context:
+            valid_uids.append(str(row["target_accession"]).upper())
+            
+    if not valid_uids:
+        print("No valid proteins with context found!")
+        sys.exit(1)
+        
+    sample_size = min(n, len(valid_uids))
+    sampled_uids = set(random.sample(valid_uids, sample_size))
+    print(f"Sampled {sample_size} UniProt IDs.")
+    
+    print("Extracting sequences from database...")
+    queries_dir = os.path.join(project_dir, "data", "benchmark_queries")
+    os.makedirs(queries_dir, exist_ok=True)
+    out_fasta = os.path.join(queries_dir, "auto_sampled.fasta")
+    
+    kept = []
+    for record in SeqIO.parse(fasta_path, "fasta"):
+        uid = record.id
+        if "|" in record.description:
+            parts = record.description.split("|")
+            if len(parts) >= 2:
+                db_acc = parts[1].strip()
+                if ":" in db_acc:
+                    uid = db_acc.split(":")[1].strip()
+                else:
+                    uid = db_acc.strip()
+        if uid.upper() in sampled_uids:
+            kept.append(record)
+            
+    SeqIO.write(kept, out_fasta, "fasta")
+    print(f"Saved {len(kept)} sequences to {out_fasta}")
+    return out_fasta
+
 def main():
     parser = argparse.ArgumentParser(description="Benchmark Masking Utility for Leave-One-Out Validation")
     parser.add_argument("command", choices=["mask", "unmask", "benchmark"], help="Action to perform")
-    parser.add_argument("--folder", type=str, default=None, help="Folder containing validation FASTA files (defaults to data/benchmark_targets)")
+    parser.add_argument("--query", type=str, default=None, help="FASTA file, folder, or number of random queries to sample (e.g. 500)")
     parser.add_argument("--output", type=str, default=None, help="Output file path (defaults to data/benchmark_results.csv)")
     parser.add_argument("--methods", type=str, default="seq2graph,embed2graph", help="Comma-separated search methods (seq2graph, embed2graph)")
     
@@ -481,17 +554,22 @@ def main():
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     if args.command == "mask":
-        target_dir = os.path.join(project_dir, "data", "benchmark_targets")
+        target_dir = args.query if args.query and not args.query.isdigit() else os.path.join(project_dir, "data", "benchmark_targets")
         queries_dir = os.path.join(project_dir, "data", "benchmark_queries")
         mask_database(project_dir, target_dir, queries_dir)
     elif args.command == "unmask":
         unmask_database(project_dir)
     elif args.command == "benchmark":
-        folder = args.folder if args.folder else os.path.join(project_dir, "data", "benchmark_targets")
         output = args.output if args.output else os.path.join(project_dir, "data", "benchmark_results.csv")
         methods = [m.strip() for m in args.methods.split(",") if m.strip()]
         
-        run_benchmark(project_dir, folder, output, methods)
+        query_input = args.query
+        if not query_input:
+            query_input = os.path.join(project_dir, "data", "benchmark_targets")
+        elif query_input.isdigit():
+            query_input = auto_sample_queries(project_dir, int(query_input))
+            
+        run_benchmark(project_dir, query_input, output, methods)
 
 if __name__ == "__main__":
     main()

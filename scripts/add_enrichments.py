@@ -1,4 +1,5 @@
 import json
+import argparse
 import scipy.stats as stats
 from collections import Counter, defaultdict
 from typing import Any
@@ -95,8 +96,11 @@ def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[s
 
 
 def main():
-    # Update this path to the location on the BioHPC cluster
-    db_path = "/local/storage/thomas/5_PSMM/data/global_path_index.json"
+    parser = argparse.ArgumentParser(description="Calculate pathway enrichments")
+    parser.add_argument("--db", required=True, help="Path to global_path_index.json")
+    args = parser.parse_args()
+    
+    db_path = args.db
     
     print(f"Loading {db_path}...")
     with open(db_path, "r", encoding="utf-8") as f:

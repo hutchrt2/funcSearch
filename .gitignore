@@ -37,8 +37,12 @@ logs/
 Thumbs.db
 
 # Benchmarking
+benchmark_results.csv
 data/benchmark_targets/
 data/benchmark_queries/
 data/benchmark_results.csv
 data/test_benchmark_results.csv
 
+# Input template
+input/*
+!input/.gitkeep
