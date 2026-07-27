@@ -14,9 +14,10 @@ def get_python_exe():
 
 PYTHON_EXE = get_python_exe()
 
-def run_command(cmd, cwd=PROJECT_DIR, env=None):
-    print(f"Running: {' '.join(cmd)}")
-    sys.stdout.flush()
+def run_command(cmd, cwd=PROJECT_DIR, env=None, quiet=False):
+    if not quiet:
+        print(f"Running: {' '.join(cmd)}")
+        sys.stdout.flush()
     try:
         if env:
             current_env = os.environ.copy()
@@ -51,9 +52,36 @@ def main():
           .*@@@@%=:.=+::-*@@@@%-                                     .****=                
               .:=*%@@@@%#*-.                                           :++                 
 
-PSMM Unified Command-Line Tool"""
+PSMM Unified Command-Line Tool
 
-    parser = argparse.ArgumentParser(
+PIPELINE REBUILD COMMANDS:
+  rebuild full                 Sequential end-to-end rebuild (Graph + Search)
+  
+  rebuild graph                Rebuild the UI Knowledge Graph and Enrichments
+      compile                  (Subcommand) Only compile raw outputs into UI database
+      enrich                   (Subcommand) Only calculate and update pathway enrichments
+      
+  rebuild search               Rebuild Sequence Search Databases (MMseqs2/PLM)
+      fetch                    (Subcommand) Only fetch physical FASTA sequences
+      index                    (Subcommand) Only build the MMseqs2/PLM search indices
+
+OTHER COMMANDS:
+  serve                        Start FastAPI Web Dispatcher
+  benchmark                    Run search & masking validation benchmarks
+      run                      (Subcommand) Run sequence masking evaluation
+      evaluate                 (Subcommand) Evaluate benchmark results
+  verify                       Run integration tests
+  export                       Export pathway enrichments to CSV
+"""
+
+    class CustomHelpParser(argparse.ArgumentParser):
+        def print_help(self, file=None):
+            if file is None:
+                import sys
+                file = sys.stdout
+            file.write(self.description + "\n")
+
+    parser = CustomHelpParser(
         description=ASCII_ART,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -78,23 +106,36 @@ PSMM Unified Command-Line Tool"""
     # benchmark evaluate
     bench_eval_parser = bench_subparsers.add_parser("evaluate", help="Evaluate benchmark results")
 
-    # 3. Fetch
-    fetch_parser = subparsers.add_parser("fetch", help="Fetch reference sequences (ETL)")
+    # 3. Fetch (Hidden)
+    fetch_parser = subparsers.add_parser("fetch", help=argparse.SUPPRESS)
     fetch_parser.add_argument("--input", help="Custom list/dataframe of accessions to fetch")
     fetch_parser.add_argument("--no-cache", action="store_true", help="Force raw downloads")
 
-    # 4. DB
-    db_parser = subparsers.add_parser("db", help="Manage index and reference databases")
+    # 4. DB (Hidden)
+    db_parser = subparsers.add_parser("db", help=argparse.SUPPRESS)
     db_parser.add_argument("--init", action="store_true", help="Build search indexes")
     db_parser.add_argument("--clean", action="store_true", help="Clear old index before build")
     db_parser.add_argument("--method", choices=["seq2graph", "embed2graph", "all"], default="all", help="Target specific search method index")
 
     # 5. Rebuild
-    rebuild_parser = subparsers.add_parser("rebuild", help="Sequential end-to-end rebuild")
-    rebuild_parser.add_argument("--sync-norm", action="store_true", help="Sync normalization zst dataset first")
+    rebuild_parser = subparsers.add_parser("rebuild", help="Sequential pipeline rebuilds")
+    rebuild_subparsers = rebuild_parser.add_subparsers(dest="rebuild_target")
+    
+    # rebuild full
+    rebuild_full = rebuild_subparsers.add_parser("full", help="Sequential end-to-end rebuild")
+    rebuild_full.add_argument("--sync-norm", action="store_true", help="Sync normalization zst dataset first")
+    
+    # rebuild graph
+    rebuild_graph = rebuild_subparsers.add_parser("graph", help="Rebuild the UI Knowledge Graph and Enrichments")
+    rebuild_graph.add_argument("step", nargs="?", choices=["all", "compile", "enrich"], default="all", help="Which step to run (default: all)")
 
-    # 6. Enrich
-    enrich_parser = subparsers.add_parser("enrich", help="Run pathway enrichment tests and tools")
+    # rebuild search
+    rebuild_search = rebuild_subparsers.add_parser("search", help="Rebuild Sequence Search Databases (MMseqs2/PLM)")
+    rebuild_search.add_argument("step", nargs="?", choices=["all", "fetch", "index"], default="all", help="Which step to run (default: all)")
+    rebuild_search.add_argument("--method", choices=["all", "seq2graph", "embed2graph"], default="all", help="Which search index to build (default: all)")
+
+    # 6. Enrich (Hidden)
+    enrich_parser = subparsers.add_parser("enrich", help=argparse.SUPPRESS)
     enrich_subparsers = enrich_parser.add_subparsers(dest="enrich_command")
     
     # enrich calculate
@@ -103,13 +144,21 @@ PSMM Unified Command-Line Tool"""
     
     # enrich export
     enrich_export_parser = enrich_subparsers.add_parser("export", help="Export global path index enrichments to CSV")
-    enrich_export_parser.add_argument("--output", default="enrichments.csv", help="Output CSV path")
+    enrich_export_parser.add_argument("--output", default=os.path.join(PROJECT_DIR, "data", "enrichments.csv"), help="Output CSV path")
 
     # enrich update-papers
     enrich_subparsers.add_parser("update-papers", help="Trickle down global enrichments into individual paper JSONs")
 
     # 7. Verify
     subparsers.add_parser("verify", help="Run integration tests")
+
+    # 8. Build Graph (Hidden)
+    build_graph_parser = subparsers.add_parser("build-graph", help=argparse.SUPPRESS)
+    build_graph_parser.add_argument("--outdir", default=os.path.join(PROJECT_DIR, "data"), help="Directory to write the compiled database")
+
+    # 9. Export
+    export_parser = subparsers.add_parser("export", help="Export pathway enrichments to CSV")
+    export_parser.add_argument("--output", default=os.path.join(PROJECT_DIR, "data", "enrichments.csv"), help="Output CSV path")
 
     args = parser.parse_args()
 
@@ -147,15 +196,13 @@ PSMM Unified Command-Line Tool"""
         run_command(cmd)
 
     elif args.command == "db":
-        mmseqs_env = {"PATH": f"/programs/mmseqs/bin:{os.environ.get('PATH', '')}"}
-        embed_env = mmseqs_env.copy()
-        embed_env.update({"OMP_NUM_THREADS": "20", "MKL_NUM_THREADS": "20"})
+        embed_env = {"OMP_NUM_THREADS": "20", "MKL_NUM_THREADS": "20"}
 
         if args.method in ["seq2graph", "all"]:
             cmd = [PYTHON_EXE, "-m", "psmm.bridges.seq2graph"]
             if args.init: cmd.append("--init")
             if args.clean: cmd.append("--clean")
-            run_command(cmd, env=mmseqs_env)
+            run_command(cmd)
         
         if args.method in ["embed2graph", "all"]:
             cmd = [PYTHON_EXE, "-m", "psmm.bridges.embed2graph"]
@@ -164,9 +211,38 @@ PSMM Unified Command-Line Tool"""
             run_command(cmd, env=embed_env)
 
     elif args.command == "rebuild":
-        if args.sync_norm:
-            run_command([os.path.join(PROJECT_DIR, "scripts", "load_normalization_data.sh")])
-        run_command([os.path.join(PROJECT_DIR, "scripts", "full_rebuild_pipeline.sh")])
+        def run_psmm(*subcmd):
+            run_command([PYTHON_EXE, os.path.abspath(__file__)] + list(subcmd))
+
+        target = getattr(args, "rebuild_target", None)
+        
+        if target in ["full", "graph"]:
+            step = getattr(args, "step", "all") if target == "graph" else "all"
+            if step in ["all", "compile"]:
+                print("\n=== [Knowledge Graph Pipeline] ===")
+                print("--- Compiling raw outputs into global_path_index.json ---")
+                run_psmm("build-graph")
+            if step in ["all", "enrich"]:
+                print("--- Calculating pathway enrichments ---")
+                run_psmm("enrich", "calculate")
+                print("--- Trickling enrichments into paper bundles ---")
+                run_psmm("enrich", "update-papers")
+            
+        if target in ["full", "search"]:
+            step = getattr(args, "step", "all") if target == "search" else "all"
+            print("\n=== [Sequence Search Pipeline] ===")
+            if target == "full" and getattr(args, "sync_norm", False):
+                print("--- Loading new normalization data ---")
+                run_command([os.path.join(PROJECT_DIR, "scripts", "load_normalization_data.sh")])
+            if step in ["all", "fetch"]:
+                print("--- Running sequence fetcher ---")
+                run_psmm("fetch")
+            if step in ["all", "index"]:
+                print("--- Rebuilding Seq2Graph & Embed2Graph indices ---")
+                run_psmm("db", "--init", "--clean", "--method", getattr(args, "method", "all"))
+            
+        if target not in ["full", "graph", "search"]:
+            rebuild_parser.print_help()
 
     elif args.command == "enrich":
         if getattr(args, "enrich_command", None) == "update-papers":
@@ -179,10 +255,15 @@ PSMM Unified Command-Line Tool"""
             export_script = f"""
 import json
 import csv
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs): return iterable
+
 with open('{PROJECT_DIR}/data/global_path_index.json', 'r') as f:
     data = json.load(f)
 rows = []
-for e in data.get('entities', []):
+for e in tqdm(data.get('entities', []), desc="Extracting enrichments"):
     if e.get('enrichments'):
         for enr in e['enrichments']:
             rows.append({{'entity_id': e['id'], 'ontology_id': e.get('ontology_id'), 'trait_concept': enr.get('trait_concept'), 'trait_label': enr.get('trait_label'), 'p_value': enr.get('p_value'), 'fdr': enr.get('fdr')}})
@@ -195,7 +276,8 @@ if rows:
 else:
     print("No enrichments found to export.")
 """
-            run_command([PYTHON_EXE, "-c", export_script])
+            print("Preparing to extract enrichments for export...")
+            run_command([PYTHON_EXE, "-c", export_script], quiet=True)
         elif getattr(args, "enrich_command", None) == "calculate":
             cmd = [PYTHON_EXE, os.path.join(PROJECT_DIR, "scripts", "add_enrichments.py"), "--db", args.db]
             run_command(cmd)
@@ -204,6 +286,13 @@ else:
 
     elif args.command == "verify":
         run_command([PYTHON_EXE, "-m", "psmm.api.verify"])
+
+    elif args.command == "build-graph":
+        cmd = [PYTHON_EXE, os.path.join(PROJECT_DIR, "scripts", "build_knowledge_graph.py"), "--outdir", args.outdir]
+        run_command(cmd)
+
+    elif args.command == "export":
+        run_command([PYTHON_EXE, __file__, "enrich", "export", "--output", args.output])
 
 if __name__ == "__main__":
     main()

@@ -10,6 +10,11 @@ from datetime import datetime
 from Bio import SeqIO
 from esm.models.esmc import ESMC
 from esm.sdk.api import ESMProtein, LogitsConfig
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs): return iterable
+    tqdm.write = print
 
 def get_device(device_override=None):
     if device_override:
@@ -34,7 +39,7 @@ def embed_sequences(sequences, tokenizer, model, device="cpu", batch_size=8):
     total_seqs = len(sequences)
     total_batches = (total_seqs + batch_size - 1) // batch_size
     
-    for batch_idx, i in enumerate(range(0, total_seqs, batch_size)):
+    for batch_idx, i in enumerate(tqdm(range(0, total_seqs, batch_size), desc="Embedding sequences")):
         batch_seqs = sequences[i:i + batch_size]
         
         batch_embeddings = []
@@ -47,22 +52,14 @@ def embed_sequences(sequences, tokenizer, model, device="cpu", batch_size=8):
                     protein_tensor, 
                     LogitsConfig(sequence=True, return_embeddings=True)
                 )
-                # logits_output.embeddings has shape (1, seq_len, hidden_size)
-                # We perform mean pooling over the sequence dimension (dim=1)
                 token_embeddings = logits_output.embeddings
-                mean_pooled = token_embeddings.mean(dim=1) # Shape: (1, hidden_size)
+                mean_pooled = token_embeddings.mean(dim=1)
                 
-                # L2 Normalize for cosine similarity calculation
                 mean_pooled = torch.nn.functional.normalize(mean_pooled, p=2, dim=1)
-                
-                # Convert back to float32 to prevent numeric type mismatch downstream (e.g., in FAISS)
                 batch_embeddings.append(mean_pooled.to(torch.float32).cpu().numpy())
                 
         if batch_embeddings:
             embeddings.append(np.vstack(batch_embeddings))
-            
-        if (batch_idx + 1) % 5 == 0 or batch_idx + 1 == total_batches:
-            print(f"  Processed batch {batch_idx + 1}/{total_batches} ({min((batch_idx + 1) * batch_size, total_seqs)}/{total_seqs} sequences)...")
             
     if not embeddings:
         return np.array([])

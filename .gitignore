@@ -21,6 +21,12 @@ htmlcov/
 # Data & Databases (never commit)
 # ==========================================
 data/
+!data/build/
+!data/build/psfd_sequences.fasta
+!data/build/sequence_metadata.csv
+RAP-MSU_2018-03-29.txt.gz
+uniprot_fields.json
+enrichments.csv
 
 # ==========================================
 # Runtime artifacts

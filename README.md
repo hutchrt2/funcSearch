@@ -96,7 +96,17 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 2. Database Rebuild (Full Pipeline)
+### 2. Building the Knowledge Graph
+
+If you have raw pipeline outputs from PSFD (either as extracted folders or `.tar.gz` files), drop them directly into the `input/` folder. The system will automatically extract tarballs and resolve the required datasets.
+
+```bash
+./psmm.py build-graph
+```
+
+This will compile the knowledge graph and write it to `data/global_path_index.json`, along with the `manifest.json` and individual paper records.
+
+### 3. Database Rebuild (Full Pipeline)
 
 Sequentially loads normalization data, fetches sequences, and builds both MMseqs2 and FAISS indexes:
 

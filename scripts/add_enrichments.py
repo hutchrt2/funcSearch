@@ -1,8 +1,14 @@
 import json
 import argparse
+import traceback
 import scipy.stats as stats
 from collections import Counter, defaultdict
 from typing import Any
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs): return iterable
+    tqdm.write = print
 
 def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[str, Any]]) -> None:
     def is_gene(t: str) -> bool:
@@ -35,7 +41,7 @@ def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[s
     trait_counts = Counter()
     co_counts = Counter()
 
-    for rel in relations:
+    for rel in tqdm(relations, desc="Processing relations", unit="rel"):
         node_ids = [rel.get("subject_entity_id"), rel.get("object_entity_id")] + rel.get("context_entity_ids", [])
         node_ids = [n for n in node_ids if n]
         
@@ -55,15 +61,18 @@ def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[s
     p_values = []
     tests = []
 
-    for (g, t), v1 in co_counts.items():
+    for (g, t), v1 in tqdm(co_counts.items(), desc="Calculating Fisher Exact Tests", unit="test"):
         v2 = gene_counts[g] - v1
         v3 = trait_counts[t] - v1
         v4 = total_relations - v1 - v2 - v3
         
-        _, p = stats.fisher_exact([[v1, v2], [v3, v4]], alternative="greater")
-        
-        tests.append((g, t))
-        p_values.append(p)
+        try:
+            _, p = stats.fisher_exact([[v1, v2], [v3, v4]], alternative="greater")
+            tests.append((g, t))
+            p_values.append(p)
+        except Exception as e:
+            tqdm.write(f"Failed Fisher test for {(g, t)}: {e}")
+            continue
     
     if not p_values:
         return

@@ -2,6 +2,12 @@ import json
 import glob
 import os
 import argparse
+import traceback
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs): return iterable
+    tqdm.write = print
 
 def main():
     parser = argparse.ArgumentParser(description="Update paper JSONs with enrichments")
@@ -24,20 +30,26 @@ def main():
     print(f"Updating {len(paper_files)} paper files...")
 
     updated = 0
-    for file in paper_files:
-        with open(file, "r", encoding="utf-8") as f:
-            paper_data = json.load(f)
-        
-        changed = False
-        for e in paper_data.get("entities", []):
-            if e["id"] in enrichment_map:
-                e["enrichments"] = enrichment_map[e["id"]]
-                changed = True
-        
-        if changed:
-            with open(file, "w", encoding="utf-8") as f:
-                json.dump(paper_data, f, separators=(",", ":"))
-            updated += 1
+    for file in tqdm(paper_files, desc="Updating paper enrichments", unit="paper"):
+        try:
+            with open(file, "r", encoding="utf-8") as f:
+                paper_data = json.load(f)
+            
+            changed = False
+            for e in paper_data.get("entities", []):
+                node_id = e.get("node_id")
+                if node_id and node_id in enrichment_map:
+                    e["enrichments"] = enrichment_map[node_id]
+                    changed = True
+            
+            if changed:
+                with open(file, "w", encoding="utf-8") as f:
+                    json.dump(paper_data, f, separators=(",", ":"))
+                updated += 1
+        except Exception as e:
+            tqdm.write(f"\n[ERROR] Failed to update paper {file}: {e}")
+            tqdm.write(traceback.format_exc())
+            continue
 
     print(f"Done! Updated {updated} paper files.")
 

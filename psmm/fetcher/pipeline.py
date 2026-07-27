@@ -1,13 +1,21 @@
 import os
 import re
 import glob
+import gzip
 import time
 import csv
 import argparse
 import hashlib
+import traceback
 from datetime import datetime
 import pandas as pd
 import requests
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs): return iterable
+    tqdm.write = print
 
 def get_sequence_hash(sequence: str) -> str:
     """Generate SHA-256 hash of the sequence string."""
@@ -149,13 +157,82 @@ class BaseFetcher:
         if 'failed_list' in self.stats:
             self.stats['failed_list'].append((accession, db_name, error_msg))
 
+class LocalCacheFetcher(BaseFetcher):
+    def __init__(self, output_fasta, metadata_csv, log_filename, accession_to_hash, sequence_hashes, failed_accessions, stats=None, search_dirs=None):
+        super().__init__(output_fasta, metadata_csv, log_filename, accession_to_hash, sequence_hashes, failed_accessions, stats)
+        self.search_dirs = search_dirs or []
+        self.local_sequences = {}
+        self._load_local_fastas()
+
+    def _load_local_fastas(self):
+        print("[LocalCacheFetcher] Scanning local directories for FASTA files...")
+        found_files = []
+        for d in self.search_dirs:
+            if not d or not os.path.exists(d):
+                continue
+            for root, _, files in os.walk(d):
+                for f in files:
+                    if f.endswith(('.fa', '.fasta', '.fa.gz', '.fasta.gz')):
+                        found_files.append(os.path.join(root, f))
+        
+        count = 0
+        for filepath in found_files:
+            try:
+                open_fn = gzip.open if filepath.endswith('.gz') else open
+                with open_fn(filepath, 'rt', encoding='utf-8', errors='ignore') as f:
+                    current_header = None
+                    seq_lines = []
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('>'):
+                            if current_header and seq_lines:
+                                self._index_header(current_header, "".join(seq_lines))
+                                count += 1
+                            current_header = line[1:].strip()
+                            seq_lines = []
+                        else:
+                            seq_lines.append(line)
+                    if current_header and seq_lines:
+                        self._index_header(current_header, "".join(seq_lines))
+                        count += 1
+            except Exception as e:
+                print(f"[LocalCacheFetcher] Warning: failed to read {filepath}: {e}")
+        print(f"[LocalCacheFetcher] Indexed {count} headers across {len(found_files)} FASTA files.")
+
+    def _index_header(self, header, sequence):
+        raw_id = header.split()[0].upper()
+        self.local_sequences[raw_id] = sequence
+        if '_' in raw_id:
+            parts = raw_id.split('_', 1)
+            sub_id = parts[1]
+            self.local_sequences[sub_id] = sequence
+            if '.' in sub_id:
+                self.local_sequences[sub_id.split('.')[0]] = sequence
+        if '.' in raw_id:
+            self.local_sequences[raw_id.split('.')[0]] = sequence
+
+    def fetch_queue(self, queue_df):
+        for idx, row in queue_df.iterrows():
+            orig_acc = str(row['target_accession']).strip()
+            acc = orig_acc.upper()
+            seq = self.local_sequences.get(acc)
+            if not seq and '.' in acc:
+                seq = self.local_sequences.get(acc.split('.')[0])
+            if not seq and '_' in acc:
+                seq = self.local_sequences.get(acc.split('_', 1)[1])
+                
+            if seq:
+                self.save_sequence('LocalCache', orig_acc, seq, row.get('global_node_id', ''), row.get('selected_organism', ''))
+                print(f"[LocalCacheFetcher] Success: Found {orig_acc} in local FASTA cache!")
+            else:
+                self.log_failure('LocalCache', orig_acc, "Not found in local FASTA files")
+
 class UniProtFetcher(BaseFetcher):
     def fetch_queue(self, queue_df):
         batch_size = 100
-        for i in range(0, len(queue_df), batch_size):
+        for i in tqdm(range(0, len(queue_df), batch_size), desc="Fetching UniProt batches"):
             batch_df = queue_df.iloc[i:i+batch_size]
             batch_accessions = batch_df['target_accession'].tolist()
-            print(f"\n[UniProt] Processing Batch {i//batch_size + 1} ({len(batch_accessions)} sequences)...")
             
             url = f"https://rest.uniprot.org/uniprotkb/accessions?accessions={','.join(batch_accessions)}&format=fasta"
             
@@ -168,9 +245,7 @@ class UniProtFetcher(BaseFetcher):
                 for _, row in batch_df.iterrows():
                     acc = row['target_accession']
                     if acc in fetched_dict:
-                        # Extract just the sequence lines, remove header
-                        seq_lines = fetched_dict[acc].split('\n')[1:] if '\n' in fetched_dict[acc] else []
-                        clean_seq = '\n'.join(seq_lines) if seq_lines else fetched_dict[acc]
+                        clean_seq = fetched_dict[acc]
                         self.save_sequence('UniProt', acc, clean_seq, row.get('global_node_id', ''), row.get('selected_organism', ''))
                     else:
                         print(f"[UniProt] Batch missed {acc}. Confirmed inactive or deleted in UniProt.")
@@ -204,8 +279,7 @@ class NCBIFetcher(BaseFetcher):
         key_param = f"&api_key={ncbi_key}" if ncbi_key else ""
         sleep_time = 0.15 if ncbi_key else 0.4
         
-        print(f"\n[NCBI] Processing {len(queue_df)} sequences...")
-        for _, row in queue_df.iterrows():
+        for _, row in tqdm(queue_df.iterrows(), total=len(queue_df), desc="Fetching NCBI sequences"):
             acc = row['target_accession']
             url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=protein&rettype=fasta&id={acc}{key_param}"
             response = self._exponential_backoff_request('get', url)
@@ -226,9 +300,8 @@ class NCBIFetcher(BaseFetcher):
 
 class EnsemblFetcher(BaseFetcher):
     def fetch_queue(self, queue_df):
-        print(f"\n[Ensembl] Processing {len(queue_df)} sequences...")
         headers = {"Content-Type": "text/x-fasta"}
-        for _, row in queue_df.iterrows():
+        for _, row in tqdm(queue_df.iterrows(), total=len(queue_df), desc="Fetching Ensembl sequences"):
             acc = row['target_accession']
             url = f"https://rest.ensembl.org/sequence/id/{acc}?type=protein"
             response = self._exponential_backoff_request('get', url, headers=headers)
@@ -343,8 +416,7 @@ class PhytozomeFetcher(BaseFetcher):
         ncbi_key = os.environ.get("NCBI_API_KEY")
         sleep_time = 0.15 if ncbi_key else 0.4
         
-        print(f"\n[Phytozome] Processing {len(queue_df)} sequences...")
-        for _, row in queue_df.iterrows():
+        for _, row in tqdm(queue_df.iterrows(), total=len(queue_df), desc="Fetching Phytozome sequences via fallback"):
             acc = row['target_accession']
             organism = row.get('selected_organism', '')
             norm_acc = self._normalize_query(acc)
@@ -608,17 +680,20 @@ def triage_row(row):
                 if val.upper() not in ['NAN', 'NONE', ''] and val != '':
                     attempts.append(('Phytozome', val))
         
-    # Deduplicate attempts while preserving order
+    # Deduplicate attempts while preserving order and prepending LocalCache
     seen = set()
-    deduped_attempts = []
+    final_attempts = []
     for db, acc in attempts:
+        if ('LocalCache', acc) not in seen:
+            seen.add(('LocalCache', acc))
+            final_attempts.append(('LocalCache', acc))
         if (db, acc) not in seen:
             seen.add((db, acc))
-            deduped_attempts.append((db, acc))
+            final_attempts.append((db, acc))
             
-    if deduped_attempts:
-        target_db, target_accession = deduped_attempts[0]
-        return pd.Series([target_db, target_accession, 'queued', deduped_attempts])
+    if final_attempts:
+        target_db, target_accession = final_attempts[0]
+        return pd.Series([target_db, target_accession, 'queued', final_attempts])
         
     # Guardrail: Family Only
     has_family = False
@@ -817,9 +892,16 @@ def run_pipeline(input_dir: str, output_dir: str, log_dir: str, force: bool):
 
         # 3. For uncached accessions, fetch using dynamic multi-round database fallback
         if not uncached_queued.empty:
+            # Search directories for local FASTA files
+            search_dirs = [
+                input_dir,
+                "/home/thomas/Projects/PlantStress-MechanismMap/Notes/phytozome_raw"
+            ]
+            
             # Initialize Fetchers
             failed_accessions = set()
             fetchers = {
+                'LocalCache': LocalCacheFetcher(fasta_output, metadata_output, log_filename, accession_to_hash, sequence_hashes, failed_accessions, stats, search_dirs=search_dirs),
                 'UniProt': UniProtFetcher(fasta_output, metadata_output, log_filename, accession_to_hash, sequence_hashes, failed_accessions, stats),
                 'NCBI': NCBIFetcher(fasta_output, metadata_output, log_filename, accession_to_hash, sequence_hashes, failed_accessions, stats),
                 'Ensembl': EnsemblFetcher(fasta_output, metadata_output, log_filename, accession_to_hash, sequence_hashes, failed_accessions, stats),
@@ -966,7 +1048,7 @@ def run_pipeline(input_dir: str, output_dir: str, log_dir: str, force: bool):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-DB Sequence Fetcher Engine")
     project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    parser.add_argument("--input", "-i", default=os.path.join(project_dir, "data", "input"), help="Path to input directory containing CSV files (default: 'data/input').")
+    parser.add_argument("--input", "-i", default=os.path.join(project_dir, "input"), help="Path to input directory containing CSV files (default: 'input').")
     parser.add_argument("--output", "-o", default=os.path.join(project_dir, "data", "build"), help="Path to output directory (default: 'data/build').")
     parser.add_argument("--logs", "-l", default="logs", help="Path to directory for log files (default: 'logs').")
     parser.add_argument("--force", "-f", action="store_true", help="Force re-download of all sequences, ignoring existing cache.")
