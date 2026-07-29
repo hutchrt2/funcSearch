@@ -80,31 +80,49 @@ def extract_tarball_if_needed(tar_path: Path, extract_to: Path) -> Path:
     return extract_to
 
 
-def resolve_input_dir(name: str, legacy_name: str = "") -> Path:
-    # 1. Try exact directory match
-    dir_path = INPUT_DIR / name
-    if dir_path.is_dir():
-        return dir_path
-        
-    # 2. Try legacy directory match
-    if legacy_name:
-        legacy_dir_path = INPUT_DIR / legacy_name
-        if legacy_dir_path.is_dir():
-            return legacy_dir_path
+def resolve_input_dir(*names: str) -> Path:
+    found = []
+    
+    for name in names:
+        if not name:
+            continue
             
-    # 3. Try tarball match
-    tar_path = INPUT_DIR / f"{name}.tar.gz"
-    if tar_path.is_file():
-        tmp_dir = INPUT_DIR / "tmp" / name
-        return extract_tarball_if_needed(tar_path, tmp_dir)
+        # Try directory match
+        dir_path = INPUT_DIR / name
+        if dir_path.is_dir():
+            contents = list(dir_path.iterdir())
+            if len(contents) == 1 and contents[0].name.endswith(".tar.gz"):
+                nested_tar = contents[0]
+                print(f"Extracting nested tarball {nested_tar.name} in {dir_path}...")
+                import subprocess
+                subprocess.run(["tar", "-xzf", nested_tar.name], cwd=dir_path, check=True)
+            found.append((name, dir_path, False))
+            
+        # Try tarball match
+        tar_path = INPUT_DIR / f"{name}.tar.gz"
+        if tar_path.is_file():
+            found.append((name, tar_path, True))
+            
+    if len(found) > 1:
+        found_names = [f[0] for f in found]
+        raise ValueError(f"Ambiguous input files found. Multiple valid candidates exist: {found_names}. Please remove duplicates to ensure the correct data is loaded.")
         
-    if legacy_name:
-        legacy_tar_path = INPUT_DIR / f"{legacy_name}.tar.gz"
-        if legacy_tar_path.is_file():
-            tmp_dir = INPUT_DIR / "tmp" / legacy_name
-            return extract_tarball_if_needed(legacy_tar_path, tmp_dir)
-
-    raise FileNotFoundError(f"Could not find input directory or tarball for '{name}'. Expected it in {INPUT_DIR.resolve()}")
+    if not found:
+        raise FileNotFoundError(f"Could not find input directory or tarball for any of {names}. Expected one in {INPUT_DIR.resolve()}")
+        
+    name, path, is_tarball = found[0]
+    
+    if is_tarball:
+        tmp_dir = INPUT_DIR / "tmp" / name
+        return extract_tarball_if_needed(path, tmp_dir)
+        
+    # Check for single nested directory wrapper (ignoring any leftover .tar.gz files)
+    dirs = [f for f in path.iterdir() if f.is_dir()]
+    files = [f for f in path.iterdir() if f.is_file()]
+    if len(dirs) == 1 and all(f.name.endswith(".tar.gz") for f in files):
+        return dirs[0]
+        
+    return path
 
 HYPERGRAPH_DIR = Path()
 SENTENCE_DIR = Path()
@@ -227,23 +245,51 @@ GLOBAL_NORMALIZATIONS: dict[str, dict[str, dict[str, str]]] = defaultdict(dict)
 
 def preload_global_normalizations() -> None:
     csv_path = NORMALIZATION_DIR / "normalized_entities.csv"
-    if not source_exists(csv_path):
-        return
-    resolved_path = source_path(csv_path)
-    print(f"Preloading global normalizations from {resolved_path}...")
-    rows = load_csv_rows(csv_path)
-    for row in rows:
-        pmcid = row.get("pmcid", "")
-        node_id = row.get("node_id", "")
-        if not pmcid or not node_id:
-            continue
-        GLOBAL_NORMALIZATIONS[pmcid][node_id] = {
-            "selected_ontology": row.get("selected_ontology", ""),
-            "selected_ontology_id": row.get("selected_ontology_id", ""),
-            "selected_label": row.get("selected_label", ""),
-            "canonical_form": row.get("canonical_form", ""),
-            "status": row.get("status", ""),
-        }
+    if source_exists(csv_path):
+        resolved_path = source_path(csv_path)
+        print(f"Preloading global normalizations from {resolved_path}...")
+        rows = load_csv_rows(csv_path)
+        for row in rows:
+            pmcid = row.get("pmcid", "")
+            node_id = row.get("node_id", "")
+            if not pmcid or not node_id:
+                continue
+            GLOBAL_NORMALIZATIONS[pmcid][node_id] = {
+                "selected_ontology": row.get("selected_ontology", ""),
+                "selected_ontology_id": row.get("selected_ontology_id", ""),
+                "selected_label": row.get("selected_label", ""),
+                "canonical_form": row.get("canonical_form", ""),
+                "status": row.get("status", ""),
+            }
+
+    manual_csv_path = INPUT_DIR / "manual_normalizations.csv"
+    if source_exists(manual_csv_path):
+        resolved_manual = source_path(manual_csv_path)
+        print(f"Preloading manual normalizations from {resolved_manual}...")
+        manual_rows = load_csv_rows(manual_csv_path)
+        manual_count = 0
+        for row in manual_rows:
+            pmcid = row.get("pmcid", "").strip()
+            node_id = row.get("node_id", "").strip()
+            global_node_id = row.get("global_node_id", "").strip()
+            if not pmcid or not node_id:
+                if global_node_id and ":" in global_node_id:
+                    pmcid, node_id = global_node_id.split(":", 1)
+            if not pmcid or not node_id:
+                continue
+
+            existing = GLOBAL_NORMALIZATIONS[pmcid].get(node_id, {})
+            existing.update({
+                "selected_ontology": row.get("selected_ontology", existing.get("selected_ontology", "")),
+                "selected_ontology_id": row.get("selected_ontology_id", existing.get("selected_ontology_id", "")),
+                "selected_label": row.get("selected_label", existing.get("selected_label", "")),
+                "canonical_form": row.get("canonical_form", existing.get("canonical_form", "")),
+                "status": row.get("status", existing.get("status", "manual_override")),
+            })
+            GLOBAL_NORMALIZATIONS[pmcid][node_id] = existing
+            manual_count += 1
+        print(f"Injected {manual_count} manual normalization overrides.")
+
 
 
 def source_path(path: Path) -> Path:
@@ -1986,12 +2032,12 @@ def build_database(outdir: Path) -> None:
     global COMPOUND_CLASSIFICATION_DIR, GENE_PROTEIN_NORMALIZATION_DIR
     global CONTEXT_PROPAGATION_DIR
 
-    HYPERGRAPH_DIR = resolve_input_dir("hypergraph_core_relations", "720_hypergraph")
+    HYPERGRAPH_DIR = resolve_input_dir("hypergraph_core_relations", "720_hypergraph", "7_relations_grouping")
     SENTENCE_DIR = resolve_input_dir("bioc_sentences_spacy", "111_bioc_sentences_spacy")
-    TRIPLES_EVALUATION_DIR = resolve_input_dir("triples_evaluations", "410_LLM_triples_evaluation")
-    NORMALIZATION_DIR = resolve_input_dir("normalized_entities", "920_normalized_entities")
+    TRIPLES_EVALUATION_DIR = resolve_input_dir("triples_evaluations", "410_LLM_triples_evaluation", "4_triples_evaluation")
+    NORMALIZATION_DIR = resolve_input_dir("normalized_entities", "920_normalized_entities", "9_entity_normalization_llm")
     COMPOUND_CLASSIFICATION_DIR = resolve_input_dir("compound_classifications", "930_compound_classifications")
-    GENE_PROTEIN_NORMALIZATION_DIR = resolve_input_dir("gene_protein_normalization", "940_gene_protein_normalization")
+    GENE_PROTEIN_NORMALIZATION_DIR = resolve_input_dir("gene_protein_normalization", "940_gene_protein_normalization", "10_gene_protein_normalization")
     CONTEXT_PROPAGATION_DIR = resolve_input_dir("context_propagation", "11_context_propagation")
     
     preload_global_normalizations()

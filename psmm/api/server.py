@@ -1141,6 +1141,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://alenzimic.github.io",
+        "https://hutchrt2.github.io",
         "http://localhost",
         "http://127.0.0.1",
         "http://localhost:3000",
@@ -1149,10 +1150,22 @@ app.add_middleware(
         "http://127.0.0.1:8000",
         "http://127.0.0.1:3001",
     ],
+    allow_origin_regex=r"https://.*\.ngrok-free\.dev",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def add_ngrok_and_cors_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["ngrok-skip-browser-warning"] = "true"
+    if "access-control-allow-origin" not in response.headers and "Access-Control-Allow-Origin" not in response.headers:
+        origin = request.headers.get("origin")
+        response.headers["Access-Control-Allow-Origin"] = origin if origin else "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+    return response
 
 class SearchRequest(BaseModel):
     sequence: str

@@ -709,7 +709,9 @@ def triage_row(row):
 
 def ingest_input_csvs(input_dir: str):
     """Load, combine, and apply triage to CSV files in the input directory."""
-    csv_files = glob.glob(os.path.join(input_dir, "*.csv"))
+    csv_files = glob.glob(os.path.join(input_dir, "**", "*.csv"), recursive=True)
+    allowed_files = {"gene_protein_entity_summary.csv", "manual_normalizations.csv"}
+    csv_files = [f for f in csv_files if os.path.basename(f) in allowed_files]
     if not csv_files:
         print(f"Warning: No CSV files found in {input_dir}")
         return pd.DataFrame(), 0
@@ -728,6 +730,9 @@ def ingest_input_csvs(input_dir: str):
         
     combined_df = pd.concat(dfs, ignore_index=True)
     initial_count = len(combined_df)
+    
+    if combined_df.empty:
+        return combined_df, 0
     
     # Run the triage waterfall
     combined_df[['target_db', 'target_accession', 'retrieval_status', 'retrieval_attempts']] = combined_df.apply(triage_row, axis=1)

@@ -79,7 +79,10 @@ OTHER COMMANDS:
             if file is None:
                 import sys
                 file = sys.stdout
-            file.write(self.description + "\n")
+            if self.description:
+                file.write(self.description + "\n")
+            else:
+                super().print_help(file)
 
     parser = CustomHelpParser(
         description=ASCII_ART,
@@ -92,6 +95,8 @@ OTHER COMMANDS:
     serve_parser.add_argument("--port", type=int, default=8999, help="Server port")
     serve_parser.add_argument("--host", default="0.0.0.0", help="Server host")
     serve_parser.add_argument("--dev", action="store_true", help="Start server with code reloading active")
+    serve_parser.add_argument("--tunnel", action="store_true", help="Expose the server publicly via ngrok tunnel")
+    serve_parser.add_argument("--ngrok-token", help="Ngrok authentication token (required for tunnel)")
 
     # 2. Benchmark
     bench_parser = subparsers.add_parser("benchmark", help="Run search & masking validation benchmarks")
@@ -109,6 +114,7 @@ OTHER COMMANDS:
     # 3. Fetch (Hidden)
     fetch_parser = subparsers.add_parser("fetch", help=argparse.SUPPRESS)
     fetch_parser.add_argument("--input", help="Custom list/dataframe of accessions to fetch")
+    fetch_parser.add_argument("--output", help="Output directory for FASTA and sequence metadata")
     fetch_parser.add_argument("--no-cache", action="store_true", help="Force raw downloads")
 
     # 4. DB (Hidden)
@@ -168,6 +174,24 @@ OTHER COMMANDS:
         cmd.extend(["--port", str(args.port)])
         if args.dev:
             cmd.append("--reload")
+
+        if args.tunnel:
+            try:
+                from pyngrok import ngrok
+                token = args.ngrok_token or os.environ.get("NGROK_AUTHTOKEN") or "3H6shVlTJKQheeO4ONFLYD22TCM_5dY3jvyE1bFygntBKx5pM"
+                if token:
+                    ngrok.set_auth_token(token)
+                public_url = ngrok.connect(args.port).public_url
+                print(f"\n=======================================================")
+                print(f" [TUNNEL ACTIVE] API exposed at: {public_url}")
+                print(f"=======================================================\n")
+            except ImportError:
+                print("Error: --tunnel requires pyngrok. Install with: pip install pyngrok")
+                sys.exit(1)
+            except Exception as e:
+                print(f"Error starting tunnel: {e}")
+                sys.exit(1)
+
         run_command(cmd)
 
     elif args.command == "benchmark":
@@ -193,6 +217,8 @@ OTHER COMMANDS:
             cmd.append("--force")
         if args.input:
             cmd.extend(["--input", args.input])
+        if args.output:
+            cmd.extend(["--output", args.output])
         run_command(cmd)
 
     elif args.command == "db":
