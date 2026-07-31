@@ -439,6 +439,27 @@ class PSFDDatabase:
                 l = l[0].upper() + l[1:]
             return l
 
+        # Build ontology ID to label mapping to fix missing trait labels
+        ontology_to_label = {}
+        for ent in self.entities:
+            oid = str(ent.get("ontology_id") or "").upper().strip()
+            if oid:
+                # Prioritize fields in order, but reject them if they exactly match the ontology ID
+                candidate_labels = [
+                    ent.get("selected_label"),
+                    ent.get("label"),
+                    ent.get("name"),
+                    ent.get("normalized_label")
+                ]
+                
+                best_label = oid
+                for candidate in candidate_labels:
+                    if candidate and str(candidate).strip().upper() != oid:
+                        best_label = candidate
+                        break
+                        
+                ontology_to_label[oid] = best_label
+
         # Group and normalize
         enriched_traits_dict = {}
         for ent in self.entities:
@@ -449,14 +470,20 @@ class PSFDDatabase:
                 if not trait_concept:
                     continue
                 
+                normalized_concept = str(trait_concept).strip().upper()
+                
+                if not trait_label or str(trait_label).strip().upper() == normalized_concept:
+                    trait_label = ontology_to_label.get(normalized_concept, trait_label)
+                    
                 cleaned = clean_label(trait_label)
-                category = get_enrichment_category(trait_concept, cleaned)
+                category = get_enrichment_category(normalized_concept, cleaned)
                 
                 enr["trait_label"] = cleaned
                 enr["category"] = category
+                enr["trait_concept"] = normalized_concept
                 
-                if trait_concept not in enriched_traits_dict:
-                    enriched_traits_dict[trait_concept] = {
+                if normalized_concept not in enriched_traits_dict:
+                    enriched_traits_dict[normalized_concept] = {
                         "label": cleaned,
                         "category": category
                     }
@@ -1132,7 +1159,7 @@ def parse_fasta_records(text: str) -> list:
     return [r for r in records if len(r["sequence"]) >= 20]
 
 app = FastAPI(
-    title="PSMM API Dispatcher",
+    title="funcSearch API Dispatcher",
     description="Bridge API between the live frontend UI and the PlantStress-MechanismMap architecture."
 )
 
@@ -1362,9 +1389,9 @@ async def query_seq2graph_in_process(sequence: str, evalue: Optional[float] = No
             f.write(sequence + "\n")
             
         script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        bridge_dir = os.path.join(script_dir, "psmm", "bridges")
+        bridge_dir = os.path.join(script_dir, "funcSearch", "bridges")
         
-        from psmm.bridges.seq2graph import process_query
+        from funcSearch.bridges.seq2graph import process_query
         
         loop = asyncio.get_event_loop()
         def run_seq2graph():
@@ -1628,5 +1655,5 @@ async def startup_event():
 if __name__ == "__main__":
     import uvicorn
     # Do NOT hardcode port 8000. Accept port dynamically via env var.
-    port = int(os.environ.get("PSMM_PORT", 8080))
+    port = int(os.environ.get("funcSearch_PORT", 8080))
     uvicorn.run("api_server:app", host="0.0.0.0", port=port, reload=False)

@@ -52,10 +52,11 @@ def main():
           .*@@@@%=:.=+::-*@@@@%-                                     .****=                
               .:=*%@@@@%#*-.                                           :++                 
 
-PSMM Unified Command-Line Tool
+funcSearch Unified Command-Line Tool
 
 PIPELINE REBUILD COMMANDS:
   rebuild full                 Sequential end-to-end rebuild (Graph + Search)
+      [--sync-norm]            Sync normalization dataset first
   
   rebuild graph                Rebuild the UI Knowledge Graph and Enrichments
       compile                  (Subcommand) Only compile raw outputs into UI database
@@ -64,14 +65,32 @@ PIPELINE REBUILD COMMANDS:
   rebuild search               Rebuild Sequence Search Databases (MMseqs2/PLM)
       fetch                    (Subcommand) Only fetch physical FASTA sequences
       index                    (Subcommand) Only build the MMseqs2/PLM search indices
+      [--method METHOD]        Target specific search index (seq2graph, embed2graph, all)
 
-OTHER COMMANDS:
+SERVER COMMANDS:
   serve                        Start FastAPI Web Dispatcher
-  benchmark                    Run search & masking validation benchmarks
-      run                      (Subcommand) Run sequence masking evaluation
-      evaluate                 (Subcommand) Evaluate benchmark results
-  verify                       Run integration tests
-  export                       Export pathway enrichments to CSV
+      [--port PORT]            Server port (default: 8999)
+      [--host HOST]            Server host (default: 0.0.0.0)
+      [--dev]                  Start server with code reloading active
+      [--tunnel]               Expose the server publicly via ngrok tunnel
+      [--ngrok-token TOKEN]    Ngrok authentication token
+
+EVALUATION & BENCHMARKING:
+  benchmark run                Run sequence masking evaluation
+      [--query FILE]           FASTA file/folder containing queries
+      [--output FILE]          Result file path
+      [--method METHOD]        Search method to benchmark (seq2graph, embed2graph, both)
+  benchmark evaluate           Evaluate benchmark results
+
+DATA & ENRICHMENTS:
+  enrich calculate             Run Chi-Squared / Fisher Exact enrichment tests
+  enrich export                Export global path index enrichments to CSV
+  enrich update-papers         Trickle down global enrichments into paper JSONs
+  export                       Alias for 'enrich export'
+  verify                       Run integration tests on the database
+  fetch                        Standalone sequence fetcher from upstream sources
+  db                           Standalone DB index builder
+  build-graph                  Standalone raw output compilation tool
 """
 
     class CustomHelpParser(argparse.ArgumentParser):
@@ -169,7 +188,7 @@ OTHER COMMANDS:
     args = parser.parse_args()
 
     if args.command == "serve":
-        cmd = [PYTHON_EXE, "-m", "uvicorn", "psmm.api.server:app"]
+        cmd = [PYTHON_EXE, "-m", "uvicorn", "funcSearch.api.server:app"]
         cmd.extend(["--host", args.host])
         cmd.extend(["--port", str(args.port)])
         if args.dev:
@@ -212,7 +231,7 @@ OTHER COMMANDS:
             run_command(cmd)
 
     elif args.command == "fetch":
-        cmd = [PYTHON_EXE, "-m", "psmm.fetcher.pipeline"]
+        cmd = [PYTHON_EXE, "-m", "funcSearch.fetcher.pipeline"]
         if args.no_cache:
             cmd.append("--force")
         if args.input:
@@ -225,19 +244,19 @@ OTHER COMMANDS:
         embed_env = {"OMP_NUM_THREADS": "20", "MKL_NUM_THREADS": "20"}
 
         if args.method in ["seq2graph", "all"]:
-            cmd = [PYTHON_EXE, "-m", "psmm.bridges.seq2graph"]
+            cmd = [PYTHON_EXE, "-m", "funcSearch.bridges.seq2graph"]
             if args.init: cmd.append("--init")
             if args.clean: cmd.append("--clean")
             run_command(cmd)
         
         if args.method in ["embed2graph", "all"]:
-            cmd = [PYTHON_EXE, "-m", "psmm.bridges.embed2graph"]
+            cmd = [PYTHON_EXE, "-m", "funcSearch.bridges.embed2graph"]
             if args.init: cmd.append("--init")
             if args.clean: cmd.append("--clean")
             run_command(cmd, env=embed_env)
 
     elif args.command == "rebuild":
-        def run_psmm(*subcmd):
+        def run_funcSearch(*subcmd):
             run_command([PYTHON_EXE, os.path.abspath(__file__)] + list(subcmd))
 
         target = getattr(args, "rebuild_target", None)
@@ -247,12 +266,12 @@ OTHER COMMANDS:
             if step in ["all", "compile"]:
                 print("\n=== [Knowledge Graph Pipeline] ===")
                 print("--- Compiling raw outputs into global_path_index.json ---")
-                run_psmm("build-graph")
+                run_funcSearch("build-graph")
             if step in ["all", "enrich"]:
                 print("--- Calculating pathway enrichments ---")
-                run_psmm("enrich", "calculate")
+                run_funcSearch("enrich", "calculate")
                 print("--- Trickling enrichments into paper bundles ---")
-                run_psmm("enrich", "update-papers")
+                run_funcSearch("enrich", "update-papers")
             
         if target in ["full", "search"]:
             step = getattr(args, "step", "all") if target == "search" else "all"
@@ -262,10 +281,10 @@ OTHER COMMANDS:
                 run_command([os.path.join(PROJECT_DIR, "scripts", "load_normalization_data.sh")])
             if step in ["all", "fetch"]:
                 print("--- Running sequence fetcher ---")
-                run_psmm("fetch")
+                run_funcSearch("fetch")
             if step in ["all", "index"]:
                 print("--- Rebuilding Seq2Graph & Embed2Graph indices ---")
-                run_psmm("db", "--init", "--clean", "--method", getattr(args, "method", "all"))
+                run_funcSearch("db", "--init", "--clean", "--method", getattr(args, "method", "all"))
             
         if target not in ["full", "graph", "search"]:
             rebuild_parser.print_help()
@@ -311,7 +330,7 @@ else:
             parser.parse_args(["enrich", "--help"])
 
     elif args.command == "verify":
-        run_command([PYTHON_EXE, "-m", "psmm.api.verify"])
+        run_command([PYTHON_EXE, "-m", "funcSearch.api.verify"])
 
     elif args.command == "build-graph":
         cmd = [PYTHON_EXE, os.path.join(PROJECT_DIR, "scripts", "build_knowledge_graph.py"), "--outdir", args.outdir]

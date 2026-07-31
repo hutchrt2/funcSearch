@@ -10,7 +10,7 @@ except ImportError:
     def tqdm(iterable, *args, **kwargs): return iterable
     tqdm.write = print
 
-def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[str, Any]]) -> None:
+def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[str, Any]], concepts: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = None) -> None:
     def is_gene(t: str) -> bool:
         t = t.lower()
         return "gene" in t or "protein" in t
@@ -80,7 +80,21 @@ def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[s
     fdr_adjusted = stats.false_discovery_control(p_values)
     
     significant_pairs = defaultdict(list)
-    concept_to_label = {e["ontology_id"]: e.get("selected_label") or e["ontology_id"] for e in trait_entities if "ontology_id" in e}
+    concept_to_label = {}
+    if concepts:
+        if isinstance(concepts, dict):
+            for cid, cinfo in concepts.items():
+                if isinstance(cinfo, dict) and cinfo.get("label"):
+                    concept_to_label[cid] = cinfo["label"]
+        elif isinstance(concepts, list):
+            for cinfo in concepts:
+                if isinstance(cinfo, dict) and cinfo.get("id") and cinfo.get("label"):
+                    concept_to_label[cinfo["id"]] = cinfo["label"]
+
+    for e in trait_entities:
+        oid = e.get("ontology_id")
+        if oid and oid not in concept_to_label:
+            concept_to_label[oid] = e.get("selected_label") or e.get("name") or oid
 
     added_count = 0
     for i, (g, t) in enumerate(tests):
@@ -103,7 +117,6 @@ def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[s
         else:
             e["enrichments"] = []
 
-
 def main():
     parser = argparse.ArgumentParser(description="Calculate pathway enrichments")
     parser.add_argument("--db", required=True, help="Path to global_path_index.json")
@@ -116,7 +129,7 @@ def main():
         data = json.load(f)
         
     print("Calculating enrichments...")
-    calculate_enrichments(data["entities"], data["relations"])
+    calculate_enrichments(data["entities"], data["relations"], data.get("concepts"))
     
     print("Saving...")
     with open(db_path, "w", encoding="utf-8") as f:

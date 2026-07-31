@@ -252,15 +252,19 @@ def preload_global_normalizations() -> None:
         for row in rows:
             pmcid = row.get("pmcid", "")
             node_id = row.get("node_id", "")
+            global_node_id = row.get("global_node_id", "")
             if not pmcid or not node_id:
                 continue
-            GLOBAL_NORMALIZATIONS[pmcid][node_id] = {
+            norm_data = {
                 "selected_ontology": row.get("selected_ontology", ""),
                 "selected_ontology_id": row.get("selected_ontology_id", ""),
                 "selected_label": row.get("selected_label", ""),
                 "canonical_form": row.get("canonical_form", ""),
                 "status": row.get("status", ""),
             }
+            GLOBAL_NORMALIZATIONS[pmcid][node_id] = norm_data
+            if global_node_id:
+                GLOBAL_NORMALIZATIONS[""][global_node_id] = norm_data
 
     manual_csv_path = INPUT_DIR / "manual_normalizations.csv"
     if source_exists(manual_csv_path):
@@ -272,10 +276,19 @@ def preload_global_normalizations() -> None:
             pmcid = row.get("pmcid", "").strip()
             node_id = row.get("node_id", "").strip()
             global_node_id = row.get("global_node_id", "").strip()
+            
+            if not global_node_id and node_id.startswith("global.entity"):
+                global_node_id = node_id
+                node_id = ""
+                
             if not pmcid or not node_id:
                 if global_node_id and ":" in global_node_id:
                     pmcid, node_id = global_node_id.split(":", 1)
-            if not pmcid or not node_id:
+                    
+            if not pmcid and not node_id and global_node_id:
+                pmcid = ""
+                node_id = global_node_id
+            elif not pmcid or not node_id:
                 continue
 
             existing = GLOBAL_NORMALIZATIONS[pmcid].get(node_id, {})
@@ -290,6 +303,63 @@ def preload_global_normalizations() -> None:
             manual_count += 1
         print(f"Injected {manual_count} manual normalization overrides.")
 
+
+GLOBAL_GENE_PROTEIN_ROWS: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+def preload_gene_protein_normalizations() -> None:
+    entity_summary_path = GENE_PROTEIN_NORMALIZATION_DIR / "gene_protein_entity_summary.csv"
+    taxon_summary_path = INPUT_DIR / "gene_protein_taxon_summary.csv"
+    normalizations_path = INPUT_DIR / "gene_protein_normalizations.csv"
+
+    loaded_count = 0
+    for csv_path in [entity_summary_path, taxon_summary_path]:
+        if source_exists(csv_path):
+            resolved_path = source_path(csv_path)
+            print(f"Preloading gene protein normalizations from {resolved_path}...")
+            rows = load_csv_rows(csv_path)
+            for row in rows:
+                instance_ids_str = row.get("entity_instance_ids", "")
+                if not instance_ids_str:
+                    continue
+                for instance_id in instance_ids_str.split(";"):
+                    instance_id = instance_id.strip()
+                    if not instance_id:
+                        continue
+                    pmcid = instance_id.split(".")[0]
+                    
+                    row_copy = row.copy()
+                    row_copy["entity_instance_id"] = instance_id
+                    
+                    # Remap summary headers to match what the ranking logic expects
+                    if "best_decision" in row:
+                        row_copy["decision"] = row.get("best_decision", "")
+                        row_copy["status"] = row.get("best_status", "")
+                        row_copy["normalization_scope"] = row.get("best_normalization_scope", "")
+                        row_copy["normalization_confidence"] = row.get("best_normalization_confidence", "")
+                        row_copy["gene_query"] = row.get("best_gene_query", "")
+                        row_copy["lookup_query"] = row.get("best_lookup_query", "")
+                        row_copy["lookup_strategy"] = row.get("best_lookup_strategy", "")
+                        row_copy["match_type"] = row.get("best_match_type", "")
+                    if "canonical_forms" in row:
+                        row_copy["canonical_form"] = row.get("canonical_forms", "")
+                    if "entity_surface_ids" in row:
+                        row_copy["entity_surface_id"] = row.get("entity_surface_ids", "")
+                        
+                    GLOBAL_GENE_PROTEIN_ROWS[pmcid].append(row_copy)
+                    loaded_count += 1
+
+    if source_exists(normalizations_path):
+        resolved_path = source_path(normalizations_path)
+        print(f"Preloading gene protein normalizations from {resolved_path}...")
+        rows = load_csv_rows(normalizations_path)
+        for row in rows:
+            pmcid = row.get("pmcid", "")
+            if not pmcid:
+                continue
+            GLOBAL_GENE_PROTEIN_ROWS[pmcid].append(row)
+            loaded_count += 1
+
+    print(f"Preloaded {loaded_count} gene protein instance rows.")
 
 
 def source_path(path: Path) -> Path:
@@ -1067,10 +1137,7 @@ def build_gene_protein_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def load_gene_protein_normalizations(pmcid: str) -> dict[str, dict[str, Any]]:
-    csv_path = GENE_PROTEIN_NORMALIZATION_DIR / f"{pmcid}.gene_protein_normalizations.csv"
-    rows: list[dict[str, Any]] = []
-    if source_exists(csv_path):
-        rows = load_csv_rows(csv_path)
+    rows = GLOBAL_GENE_PROTEIN_ROWS.get(pmcid, [])
 
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in rows:
@@ -1326,11 +1393,16 @@ def load_entities(pmcid: str, hypergraph: dict[str, Any]) -> dict[str, dict[str,
         if node_id in entities:
             continue
         norm = GLOBAL_NORMALIZATIONS.get(pmcid, {}).get(node_id)
+        if not norm:
+            global_node_id = raw.get("global_node_id", "")
+            if global_node_id:
+                norm = GLOBAL_NORMALIZATIONS.get("", {}).get(global_node_id)
+                
         if norm:
             for k, v in norm.items():
                 if v:
                     raw[k] = v
-        entity = slim_entity({}, raw)
+        entity = slim_entity(raw, raw)
         attach_compound_classification(entity, compounds_by_key)
         attach_gene_protein_normalization(entity, gene_proteins_by_key)
         if node_id:
@@ -1492,14 +1564,20 @@ def compact_sources(source_files: dict[str, Any]) -> dict[str, str]:
     return {key: relpath(Path(value)) if value else "" for key, value in source_files.items()}
 
 
-def compact_context_propagation_item(item: dict[str, Any]) -> dict[str, Any]:
+def compact_context_propagation_item(pmcid: str, item: dict[str, Any]) -> dict[str, Any]:
+    node_id = item.get("entity_id", "")
+    norm = GLOBAL_NORMALIZATIONS.get(pmcid, {}).get(node_id) if node_id else None
+    
+    ontology_id = norm.get("selected_ontology_id") if norm and norm.get("selected_ontology_id") else item.get("ontology_id", "")
+    selected_label = norm.get("selected_label") if norm and norm.get("selected_label") else item.get("selected_label", "")
+    
     return compact_dict(
         {
-            "entity_id": item.get("entity_id", ""),
+            "entity_id": node_id,
             "label": item.get("label", ""),
             "entity_type": item.get("entity_type", ""),
-            "ontology_id": item.get("ontology_id", ""),
-            "selected_label": item.get("selected_label", ""),
+            "ontology_id": ontology_id,
+            "selected_label": selected_label,
             "kind": item.get("kind", ""),
             "mark": item.get("mark", ""),
             "agreement_status": item.get("agreement_status", ""),
@@ -1509,24 +1587,24 @@ def compact_context_propagation_item(item: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def compact_context_propagation_group(group: dict[str, Any]) -> dict[str, Any]:
+def compact_context_propagation_group(pmcid: str, group: dict[str, Any]) -> dict[str, Any]:
     group = group or {}
     return {
         "display": group.get("display", ""),
-        "taxa": [compact_context_propagation_item(item) for item in as_list(group.get("taxa")) if isinstance(item, dict)],
-        "tissues": [compact_context_propagation_item(item) for item in as_list(group.get("tissues")) if isinstance(item, dict)],
-        "assays": [compact_context_propagation_item(item) for item in as_list(group.get("assays")) if isinstance(item, dict)],
+        "taxa": [compact_context_propagation_item(pmcid, item) for item in as_list(group.get("taxa")) if isinstance(item, dict)],
+        "tissues": [compact_context_propagation_item(pmcid, item) for item in as_list(group.get("tissues")) if isinstance(item, dict)],
+        "assays": [compact_context_propagation_item(pmcid, item) for item in as_list(group.get("assays")) if isinstance(item, dict)],
         "provenance_count": len(as_list(group.get("provenance"))),
     }
 
 
-def compact_context_propagation(row: dict[str, Any] | None) -> dict[str, Any]:
+def compact_context_propagation(pmcid: str, row: dict[str, Any] | None) -> dict[str, Any]:
     row = row or {}
     return {
-        "direct": compact_context_propagation_group(row.get("direct_taxon_tissue_context") or {}),
-        "event": compact_context_propagation_group(row.get("event_taxon_tissue_context") or {}),
-        "entity_linked": compact_context_propagation_group(row.get("entity_linked_taxon_tissue_context") or {}),
-        "agreement": compact_context_propagation_group(row.get("agreement_taxon_tissue_context") or {}),
+        "direct": compact_context_propagation_group(pmcid, row.get("direct_taxon_tissue_context") or {}),
+        "event": compact_context_propagation_group(pmcid, row.get("event_taxon_tissue_context") or {}),
+        "entity_linked": compact_context_propagation_group(pmcid, row.get("entity_linked_taxon_tissue_context") or {}),
+        "agreement": compact_context_propagation_group(pmcid, row.get("agreement_taxon_tissue_context") or {}),
     }
 
 
@@ -1536,7 +1614,7 @@ def load_context_propagation(pmcid: str) -> dict[str, dict[str, Any]]:
         return {}
     payload = load_json(path)
     return {
-        row.get("relation_id", ""): compact_context_propagation(row)
+        row.get("relation_id", ""): compact_context_propagation(pmcid, row)
         for row in payload.get("relations", [])
         if row.get("relation_id")
     }
@@ -1556,7 +1634,7 @@ def build_paper(pmcid: str) -> dict[str, Any]:
     for relation in relations:
         relation["taxon_tissue_context"] = context_propagation_by_relation.get(
             relation.get("record_id", ""),
-            compact_context_propagation({}),
+            compact_context_propagation(pmcid, {}),
         )
     relation_ids = {row["record_id"] for row in relations}
     events = [slim_event(row) for row in hypergraph.get("atomic_events", [])]
@@ -1681,7 +1759,7 @@ def build_paper(pmcid: str) -> dict[str, Any]:
     }
 
 
-def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[str, Any]]) -> None:
+def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[str, Any]], concepts_map: dict[str, dict[str, Any]] | None = None) -> None:
     def is_gene(t: str) -> bool:
         t = t.lower()
         return "gene" in t or "protein" in t
@@ -1748,7 +1826,16 @@ def calculate_enrichments(entities: list[dict[str, Any]], relations: list[dict[s
     fdr_adjusted = stats.false_discovery_control(p_values)
     
     significant_pairs = defaultdict(list)
-    concept_to_label = {e["ontology_id"]: e.get("selected_label") or e["ontology_id"] for e in trait_entities if "ontology_id" in e}
+    concept_to_label = {}
+    if concepts_map:
+        for cid, cinfo in concepts_map.items():
+            if isinstance(cinfo, dict) and cinfo.get("label"):
+                concept_to_label[cid] = cinfo["label"]
+
+    for e in trait_entities:
+        oid = e.get("ontology_id")
+        if oid and oid not in concept_to_label:
+            concept_to_label[oid] = e.get("selected_label") or e.get("name") or oid
 
     for i, (g, t) in enumerate(tests):
         if fdr_adjusted[i] < 0.05:
@@ -1879,7 +1966,7 @@ def build_global_path_index(papers: list[dict[str, Any]], generated_at: str) -> 
                     "subject_entity_id": relation.get("subject_node_id", ""),
                     "object_entity_id": relation.get("object_node_id", ""),
                     "context_entity_ids": relation.get("context_node_ids", []),
-                    "taxon_tissue_context": relation.get("taxon_tissue_context") or compact_context_propagation({}),
+                    "taxon_tissue_context": relation.get("taxon_tissue_context") or compact_context_propagation(pmcid, {}),
                     "event_ids": relation.get("event_ids", []),
                     "evidence_sentence_ids": relation.get("evidence_sentence_ids", []),
                     "evidence_preview": " ".join(
@@ -1907,7 +1994,7 @@ def build_global_path_index(papers: list[dict[str, Any]], generated_at: str) -> 
                 }
             )
 
-    calculate_enrichments(entities, relations)
+    calculate_enrichments(entities, relations, concepts)
 
     concept_rows: list[dict[str, Any]] = []
     for concept in concepts.values():
@@ -2041,6 +2128,7 @@ def build_database(outdir: Path) -> None:
     CONTEXT_PROPAGATION_DIR = resolve_input_dir("context_propagation", "11_context_propagation")
     
     preload_global_normalizations()
+    preload_gene_protein_normalizations()
     manifest = build(outdir.resolve())
     print(f"Read outputs from {INPUT_DIR.resolve()}")
     print(f"Wrote PSFD static data to {outdir.resolve() / 'data'}")

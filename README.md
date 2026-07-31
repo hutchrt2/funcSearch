@@ -1,6 +1,6 @@
-# PlantStress MechanismMap (PSMM)
+# funcSearch
 
-The Plant Stress Mechanism Map (PSMM) is an integrated system for mapping, analyzing, and querying plant stress biological entities at the protein level. It bridges structural language models with traditional sequence alignment tools to translate raw molecular sequence data into a navigable relational knowledge graph.
+funcSearch is an integrated system for mapping, analyzing, and querying plant stress biological entities at the protein level. It bridges structural language models with traditional sequence alignment tools to translate raw molecular sequence data into a navigable relational knowledge graph.
 
 This repository unifies four foundational components into a single deployable service:
 
@@ -14,8 +14,8 @@ This repository unifies four foundational components into a single deployable se
 ## Architecture
 
 ```text
-5_PSMM/
-├── psmm/                         # Core Python package
+1_funcSearch/
+├── funcSearch/                         # Core Python package
 │   ├── api/
 │   │   ├── server.py             # FastAPI application (endpoints, CORS, caching)
 │   │   └── verify.py             # Database integrity verification utilities
@@ -27,10 +27,10 @@ This repository unifies four foundational components into a single deployable se
 ├── scripts/
 │   ├── start_api.sh              # Launch the FastAPI server
 │   ├── full_rebuild_pipeline.sh  # End-to-end database rebuild
-│   ├── load_normalization_data.sh# Copy & decompress PSFD normalization data
+│   ├── load_normalization_data.sh# Copy & decompress funcMap normalization data
 │   └── benchmark_masking.py      # Benchmark masking utilities for evaluation
 ├── data/                         # All runtime data (gitignored)
-│   ├── input/                    # Normalization CSVs from PSFD
+│   ├── input/                    # Normalization CSVs from funcMap
 │   ├── build/                    # Intermediate: sequence FASTA + metadata
 │   ├── blastdb/                  # MMseqs2 database files (symlink)
 │   ├── embeddb/                  # FAISS index + ESM-C embeddings (symlink)
@@ -70,7 +70,7 @@ Users can configure search behavior through the API and UI:
 | `min_similarity` | ESM-C | Minimum cosine similarity threshold | None |
 
 ### Knowledge Graph Integration
-- Queries are resolved against a structured knowledge graph derived from the PSFD corpus.
+- Queries are resolved against a structured knowledge graph derived from the funcMap corpus.
 - Matched proteins are linked to their biological relationships (genes, metabolites, pathways, tissues, species, experimental conditions).
 - Results include paper provenance (PMCIDs), ontology annotations, and entity context.
 
@@ -85,80 +85,88 @@ Users can configure search behavior through the API and UI:
 
 ---
 
-## Quick Start
+## CLI Reference
 
-### 1. Virtual Environment Setup
+The `funcSearch.py` script provides a unified interface for all pipeline and server operations.
+
+### 1. Server Commands
+Starts the FastAPI backend for handling sequence alignments and ontology relationships.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+./funcSearch.py serve [OPTIONS]
+```
+| Option | Description |
+|--------|-------------|
+| `--port` | Port to run the server on (default: 8999) |
+| `--host` | Host address to bind (default: 0.0.0.0) |
+| `--dev` | Run in development mode with automatic code reloading |
+| `--tunnel` | Publicly expose the API using an Ngrok tunnel |
+| `--ngrok-token` | Auth token for the Ngrok tunnel (if required) |
+
+### 2. Pipeline Rebuild Commands
+Manages the end-to-end dataset pipeline, including raw knowledge graph construction and sequence index building.
+
+**Full Pipeline:**
+```bash
+./funcSearch.py rebuild full [--sync-norm]
+```
+*(Runs the entire process sequentially: graph compilation, enrichment calculations, sequence fetching, and database indexing. Pass `--sync-norm` to download the latest normalization dataset before starting).*
+
+**Knowledge Graph Pipeline:**
+```bash
+./funcSearch.py rebuild graph [all | compile | enrich]
+```
+- `all`: (Default) Compiles the graph and calculates enrichments.
+- `compile`: Compiles the UI database from raw pipeline outputs (saves to `data/global_path_index.json`).
+- `enrich`: Only calculates the Fisher/Chi-squared pathway enrichments and updates paper bundles.
+
+**Sequence Search Pipeline:**
+```bash
+./funcSearch.py rebuild search [all | fetch | index] [--method METHOD]
+```
+- `all`: (Default) Fetches sequences and builds the indices.
+- `fetch`: Aggregates physical FASTA sequences from upstream sources.
+- `index`: Builds the `seq2graph` (MMseqs2) and `embed2graph` (FAISS) search indices.
+- `--method`: Specify `seq2graph`, `embed2graph`, or `all` when building indices.
+
+### 3. Data & Enrichments
+Standalone commands for manipulating the compiled datasets and enrichments.
+
+```bash
+# Calculate enrichment stats on the graph
+./funcSearch.py enrich calculate
+
+# Export the enrichments as a flat CSV file
+./funcSearch.py enrich export --output enrichments_export.csv
+
+# Distribute the global enrichments into individual paper JSON bundles
+./funcSearch.py enrich update-papers
+
+# Compile raw graph data without running full rebuild
+./funcSearch.py build-graph --outdir data
 ```
 
-### 2. Building the Knowledge Graph
-
-If you have raw pipeline outputs from PSFD (either as extracted folders or `.tar.gz` files), drop them directly into the `input/` folder. The system will automatically extract tarballs and resolve the required datasets.
+### 4. Benchmarking & Evaluation
+Tools for validating the search performance of the two engines using sequence masking.
 
 ```bash
-./psmm.py build-graph
+# Run the evaluation benchmark
+./funcSearch.py benchmark run [--query FILE] [--output FILE] [--method seq2graph|embed2graph|both]
+
+# Evaluate the generated benchmark results
+./funcSearch.py benchmark evaluate
 ```
 
-This will compile the knowledge graph and write it to `data/global_path_index.json`, along with the `manifest.json` and individual paper records.
-
-### 3. Database Rebuild (Full Pipeline)
-
-Sequentially loads normalization data, fetches sequences, and builds both MMseqs2 and FAISS indexes:
-
+### 5. Utilities
 ```bash
-./psmm.py rebuild
-```
+# Verify the integrity of the built databases
+./funcSearch.py verify
 
-Pipeline stages:
-1. Load normalization data from PSFD (`load_normalization_data.sh`)
-2. Run the sequence fetcher (`psmm.fetcher.pipeline`)
-3. Build MMseqs2 database (`psmm.bridges.seq2graph --init --clean`)
-4. Build FAISS index with ESM-C embeddings (`psmm.bridges.embed2graph --init --clean`)
+# Standalone sequence fetcher
+./funcSearch.py fetch [--input FILE] [--output DIR] [--no-cache]
 
-### 3. Launch the API Server
-
-```bash
-./psmm.py serve --port 8999
-```
-
-The server starts on port **8999** by default and exposes the following endpoints:
-
-| Endpoint | Method | Description |
-| -------- | ------ | ----------- |
-| `/search` | POST | Sequence similarity search (MMseqs2 or ESM-C) |
-| `/api/extract` | POST | Full relation extraction with attribute filtering |
-| `/api/stats` | GET | Database statistics (entity/concept/relation counts) |
-| `/api/resolve_entities` | POST | Term-to-entity resolution |
-| `/api/ontology_count` | GET | Unique ontology term count |
-| `/api/data/*` | GET | Static data files (manifest, papers, metadata) |
-
-### 4. Benchmarking
-
-The system supports controlled evaluation by masking known entities from the databases and measuring retrieval accuracy:
-
-```bash
-./psmm.py benchmark run --help
-./psmm.py benchmark evaluate
-```
-
-### 5. Enrichments
-
-Run pathway enrichment tests directly on the knowledge graph using the unified CLI:
-
-```bash
-# Calculate and add enrichments to global_path_index.json
-./psmm.py enrich calculate --db data/global_path_index.json
-
-# Export global enrichments to CSV
-./psmm.py enrich export --output enrichments_export.csv
-
-# Update individual paper JSON files with enrichments
-./psmm.py enrich update-papers
+# Standalone DB builder
+./funcSearch.py db [--init] [--clean] [--method METHOD]
 ```
 
 ---
@@ -201,4 +209,24 @@ curl -X POST http://localhost:8999/api/extract \
 Raw datasets, sequence FASTAs, model weights, vector indexes, and the knowledge graph database are **strictly excluded** from version control. Only source code, pipeline scripts, and configuration are tracked. The `data/` directory is fully gitignored.
 
 Additionally, the `input/` directory is provided as a blank template. Its contents are gitignored except for a `.gitkeep` file to prevent accidental uploads of confidential sequences or datasets.
+
+---
+
+## Required Input Files
+
+To build the knowledge graph correctly, you must provide the resolved entity normalizations in the `input/` directory. The pipeline will accept these files as uncompressed `.csv` files or compressed `.tar.gz` archives, as the script will automatically uncompress them if needed.
+
+Place the following three files in `input/` (or in a sub-folder matching the expected tarball logic):
+
+1. **`gene_protein_entity_summary.csv`**
+   - **Role:** Centralized summary of all resolved gene/protein entities mapped to global node IDs.
+   - **Key Columns:** `pmcids`, `entity_instance_ids` (semicolon separated), `best_decision`, `selected_uniprot_accession`, `selected_phytozome_gene_id`.
+
+2. **`gene_protein_taxon_summary.csv`**
+   - **Role:** Species-specific sequence assignments and taxonomy contexts for ambiguous or multi-species genes.
+   - **Key Columns:** Same as the entity summary (`pmcids`, `entity_instance_ids`, `best_decision`, etc.).
+
+3. **`gene_protein_normalizations.csv`**
+   - **Role:** The raw, per-paper normalization assignments containing full alias lists and row-level metadata.
+   - **Key Columns:** `pmcid` and `entity_instance_id` (singular identifiers), `decision`, `canonical_form`, `aliases`.
 

@@ -6,7 +6,7 @@ import time
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from fastapi.testclient import TestClient
-from psmm.api.server import app, db
+from funcSearch.api.server import app, db
 
 client = TestClient(app)
 
@@ -81,7 +81,7 @@ def run_tests():
         # To do this, let's look at sequence_index.json accession A0A022PNA9, which links to entity: PMC4125134.entity.f9ce18b23f49 (elongation factor Tu)
         # Suffix is f9ce18b23f49.
         # We can mock perform_search_internal by putting search results directly into _search_cache to avoid executing bridge script subprocess
-        from psmm.api.server import _search_cache
+        from funcSearch.api.server import _search_cache
         sequence = "MGRAPCCDKASVKRGPWSPEEDEQLRSYVQSHGIGGNWIALPQKAGLNRCGKSCRLRWLNYLRPDIKHGGYTEQEDHIICSLYNSIGSRWSIIASKLPGRTDNDVKNYWNTKLKKKAMGAVQPRAAASAPSQCTSSAMAPALSPASSSVTSSSGDACFAAAATTTTTMYPPPTTPPQQQFIRFDAPPAAAAAASPTDLAPVPPPATVTADGDGGWASDALSLDDVFLGELTAGEPLFPYAELFSGFAGAAPDSKATLELSACYFPNMAEMWAASDHAYAKPQGLCNTLT"
         mock_results = [{
             "query": "query_sequence",

@@ -214,7 +214,7 @@ def mask_database(project_dir: str, target_dir: str, queries_dir: str):
             
     # 6. Rebuild MMseqs index
     print("Rebuilding MMseqs database index...")
-    script_path = os.path.join(project_dir, "psmm", "bridges", "seq2graph.py")
+    script_path = os.path.join(project_dir, "funcSearch", "bridges", "seq2graph.py")
     if os.path.exists(script_path):
         subprocess.run([sys.executable, script_path, "--init", "--clean"], cwd=os.path.dirname(script_path))
     else:
@@ -341,7 +341,7 @@ def mask_single(project_dir: str, uid: str, h_hash: str):
                         json.dump(j, f, indent=2)
                         
     # 4. Rebuild MMseqs index
-    script_path = os.path.join(project_dir, "psmm", "bridges", "seq2graph.py")
+    script_path = os.path.join(project_dir, "funcSearch", "bridges", "seq2graph.py")
     if os.path.exists(script_path):
         subprocess.run([sys.executable, script_path, "--init", "--clean"], cwd=os.path.dirname(script_path), capture_output=True)
 
@@ -359,14 +359,18 @@ def benchmark_query(project_dir: str, method: str, query_header: str, query_seq:
         f.write(query_seq + "\n")
         
     if method == "embed2graph":
-        module_name = "psmm.bridges.embed2graph"
+        module_name = "funcSearch.bridges.embed2graph"
     elif method == "seq2graph":
-        module_name = "psmm.bridges.seq2graph"
+        module_name = "funcSearch.bridges.seq2graph"
     else:
         return pd.DataFrame()
         
+    cmd = [sys.executable, "-m", module_name, "--query", query_file, "--output", output_csv]
+    if method == "seq2graph":
+        cmd.extend(["--min-seq-id", "0.75"])
+        
     subprocess.run(
-        [sys.executable, "-m", module_name, "--query", query_file, "--output", output_csv],
+        cmd,
         cwd=project_dir,
         capture_output=True,
         text=True
