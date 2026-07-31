@@ -77,16 +77,13 @@ SERVER COMMANDS:
 
 EVALUATION & BENCHMARKING:
   benchmark run                Run sequence masking evaluation
-      [--query FILE]           FASTA file/folder containing queries
+      [--query FILE/NUM]       FASTA file/folder, or number of random queries (default: 300)
       [--output FILE]          Result file path
       [--method METHOD]        Search method to benchmark (seq2graph, embed2graph, both)
   benchmark evaluate           Evaluate benchmark results
 
 DATA & ENRICHMENTS:
-  enrich calculate             Run Chi-Squared / Fisher Exact enrichment tests
-  enrich export                Export global path index enrichments to CSV
-  enrich update-papers         Trickle down global enrichments into paper JSONs
-  export                       Alias for 'enrich export'
+  export                       Export global path index enrichments to CSV
   verify                       Run integration tests on the database
   fetch                        Standalone sequence fetcher from upstream sources
   db                           Standalone DB index builder
@@ -123,8 +120,8 @@ DATA & ENRICHMENTS:
     
     # benchmark run (default)
     bench_run_parser = bench_subparsers.add_parser("run", help="Run sequence masking evaluation")
-    bench_run_parser.add_argument("--query", help="FASTA file/folder containing queries")
-    bench_run_parser.add_argument("--output", default="benchmark_results.csv", help="Result file path")
+    bench_run_parser.add_argument("--query", default="300", help="FASTA file/folder, or number of random queries")
+    bench_run_parser.add_argument("--output", default="data/benchmark_results.csv", help="Result file path")
     bench_run_parser.add_argument("--method", choices=["seq2graph", "embed2graph", "both"], default="both", help="Search method(s) to benchmark")
     
     # benchmark evaluate
